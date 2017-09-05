@@ -33,6 +33,7 @@ import android.os.Handler;
 import android.os.UserHandle;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
+import android.provider.Settings;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.server.telecom.LogUtils.EventTimer;
@@ -494,6 +495,11 @@ public class Ringer {
 
         stopRinging();
 
+        if (Settings.System.getIntForUser(mContext.getContentResolver(),
+                Settings.System.VIBRATE_ON_CALLWAITING, 0, UserHandle.USER_CURRENT) == 1) {
+            vibrate(200, 300, 500);
+        }
+
         if (mCallWaitingPlayer == null) {
             Log.addEvent(call, LogUtils.Events.START_CALL_WAITING_TONE, reason);
             mCallWaitingCall = call;
@@ -640,7 +646,7 @@ public class Ringer {
                         Long.parseLong(customVib[1]), // How long to vibrate
                         400, // Delay
                         Long.parseLong(customVib[2]), // How long to vibrate
-                        400, // How long to wait before vibrating again            
+                        400, // How long to wait before vibrating again
                     };
                     mDefaultVibrationEffect = mVibrationEffectProxy.createWaveform(vibPattern,
                             SEVEN_ELEMENTS_VIBRATION_AMPLITUDE, REPEAT_SIMPLE_VIBRATION_AT);
@@ -665,5 +671,12 @@ public class Ringer {
         public void onChange(boolean SelfChange) {
             updateVibrationPattern();
         }
+    }
+
+    public void vibrate(int v1, int p1, int v2) {
+        long[] pattern = new long[] {
+            0, v1, p1, v2
+        };
+        ((Vibrator) mContext.getSystemService(Context.VIBRATOR_SERVICE)).vibrate(pattern, -1);
     }
 }
