@@ -29,13 +29,16 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.PackageManager;
 import android.database.ContentObserver;
+import android.hardware.camera2.CameraManager;
 import android.media.AudioAttributes;
 import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
 import android.media.Ringtone;
 import android.media.VolumeShaper;
 import android.net.Uri;
+import android.os.AsyncTask;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -241,6 +244,8 @@ public class Ringer {
      */
     private CompletableFuture<Void> mBlockOnRingingFuture = null;
 
+    private TorchToggler torchToggler;
+
     private InCallTonePlayer mCallWaitingPlayer;
     private RingtoneFactory mRingtoneFactory;
     private AudioManager mAudioManager;
@@ -264,6 +269,7 @@ public class Ringer {
     private Handler mHandler = null;
     private int mSavedSpeakerInCallVolume = -1;
     private CommunicationDeviceChangedListener mCommunicationDeviceChangedListener = null;
+    private int torchMode;
 
     /**
      * Use lock different from the Telecom sync because ringing process is asynchronous outside that
@@ -302,6 +308,7 @@ public class Ringer {
         mUseSimplePattern = mContext.getResources().getBoolean(R.bool.use_simple_vibration_pattern);
         mVibrationPattern = Settings.System.getIntForUser(mContext.getContentResolver(),
             Settings.System.RINGTONE_VIBRATION_PATTERN, 0, UserHandle.USER_CURRENT);
+        torchToggler = new TorchToggler(context);
 
         updateVibrationPattern();
 
@@ -440,6 +447,17 @@ public class Ringer {
         maybeStartVibration(foregroundCall, shouldRingForContact,
                 effect, isVibratorEnabled, isRingerAudible);
 
+        boolean dndMode = !isRingerAudible;
+        torchMode = Settings.System.getIntForUser(mContext.getContentResolver(),
+                    Settings.System.FLASHLIGHT_ON_CALL, 0, UserHandle.USER_CURRENT);
+
+        boolean shouldFlash = (torchMode == 1 && !dndMode) ||
+                                (torchMode == 2 && dndMode)  ||
+                                torchMode == 3;
+        if (shouldFlash) {
+            blinkFlashlight();
+        }
+
         return shouldAcquireAudioFocus;
     }
 
@@ -485,6 +503,11 @@ public class Ringer {
             mSavedSpeakerInCallVolume = -1;
             Log.i(this, "restoreSystemSpeakerInCallVolume done");
         }
+    }
+
+    private void blinkFlashlight() {
+        torchToggler = new TorchToggler(mContext);
+        torchToggler.execute();
     }
 
     private void maybeStartVibration(Call foregroundCall, boolean shouldRingForContact,
@@ -940,6 +963,7 @@ public class Ringer {
             } else {
                 Log.i(this, "Stop local Ringing");
                 mRingtonePlayer.stop();
+                torchToggler.stop();
             }
 
             if (mIsVibrating) {
@@ -1196,6 +1220,48 @@ public class Ringer {
         @Override
         public void onChange(boolean SelfChange) {
             updateVibrationPattern();
+        }
+    }
+
+    private class TorchToggler extends AsyncTask {
+
+        private boolean shouldStop = false;
+        private CameraManager cameraManager;
+        private int duration = 500;
+        private boolean hasFlash = true;
+        private Context context;
+
+        public TorchToggler(Context ctx) {
+            this.context = ctx;
+            init();
+        }
+
+        private void init() {
+            cameraManager = (CameraManager) context.getSystemService(Context.CAMERA_SERVICE);
+            hasFlash = context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_CAMERA_FLASH);
+        }
+
+        void stop() {
+            shouldStop = true;
+        }
+
+        @Override
+        protected Object doInBackground(Object[] objects) {
+            if (hasFlash) {
+                try {
+                    String cameraId = cameraManager.getCameraIdList()[0];
+                    while (!shouldStop) {
+                        cameraManager.setTorchMode(cameraId, true);
+                        Thread.sleep(duration);
+
+                        cameraManager.setTorchMode(cameraId, false);
+                        Thread.sleep(duration);
+                    }
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+            return null;
         }
     }
 
