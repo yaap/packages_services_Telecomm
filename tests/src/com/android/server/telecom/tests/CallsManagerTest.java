@@ -103,6 +103,8 @@ import com.android.server.telecom.CallEndpointControllerFactory;
 import com.android.server.telecom.CallState;
 import com.android.server.telecom.CallerInfoLookupHelper;
 import com.android.server.telecom.CallsManager;
+import com.android.server.telecom.callsequencing.CallSequencingController;
+import com.android.server.telecom.callsequencing.CallsManagerCallSequencingAdapter;
 import com.android.server.telecom.ClockProxy;
 import com.android.server.telecom.ConnectionServiceFocusManager;
 import com.android.server.telecom.ConnectionServiceFocusManager.ConnectionServiceFocusManagerFactory;
@@ -199,7 +201,8 @@ public class CallsManagerTest extends TelecomTestCase {
     private static final PhoneAccountHandle SELF_MANAGED_2_HANDLE = new PhoneAccountHandle(
             ComponentName.unflattenFromString("com.baz/.Self2"), "Self2");
     private static final PhoneAccountHandle WORK_HANDLE = new PhoneAccountHandle(
-            ComponentName.unflattenFromString("com.foo/.Blah"), "work", new UserHandle(10));
+            ComponentName.unflattenFromString("com.foo/.Blah"), "work",
+            new UserHandle(SECONDARY_USER_ID));
     private static final PhoneAccountHandle SELF_MANAGED_W_CUSTOM_HANDLE = new PhoneAccountHandle(
             new ComponentName(TEST_PACKAGE_NAME, "class"), "1", TEST_USER_HANDLE);
     private static final PhoneAccount SIM_1_ACCOUNT = new PhoneAccount.Builder(SIM_1_HANDLE, "Sim1")
@@ -3044,9 +3047,9 @@ public class CallsManagerTest extends TelecomTestCase {
 
     /**
      * Verify that
-     * {@link CallsManager#transactionHoldPotentialActiveCallForNewCall(Call, boolean,
-     * OutcomeReceiver)}s OutcomeReceiver returns onResult when there is no active call to place
-     * on hold.
+     * {@link CallsManagerCallSequencingAdapter#transactionHoldPotentialActiveCallForNewCall(Call,
+     * boolean, OutcomeReceiver)}s OutcomeReceiver returns onResult when there is no active call to
+     * place on hold.
      */
     @MediumTest
     @Test
@@ -3068,8 +3071,8 @@ public class CallsManagerTest extends TelecomTestCase {
 
     /**
      * Verify that
-     * {@link CallsManager#transactionHoldPotentialActiveCallForNewCall(Call, boolean,
-     * OutcomeReceiver)}s OutcomeReceiver returns onError when there is an active call that
+     * {@link CallsManagerCallSequencingAdapter#transactionHoldPotentialActiveCallForNewCall(Call,
+     * boolean, OutcomeReceiver)}s OutcomeReceiver returns onError when there is an active call that
      * cannot be held, and it's a CallControlRequest.
      */
     @MediumTest
@@ -3086,9 +3089,9 @@ public class CallsManagerTest extends TelecomTestCase {
 
     /**
      * Verify that
-     * {@link CallsManager#transactionHoldPotentialActiveCallForNewCall(Call, boolean,
-     * OutcomeReceiver)}s OutcomeReceiver returns onResult when there is a holdable call and
-     * it's a CallControlRequest.
+     * {@link CallsManagerCallSequencingAdapter#transactionHoldPotentialActiveCallForNewCall(Call,
+     * boolean, OutcomeReceiver)}s OutcomeReceiver returns onResult when there is a holdable call
+     * and it's a CallControlRequest.
      */
     @MediumTest
     @Test
@@ -3105,9 +3108,9 @@ public class CallsManagerTest extends TelecomTestCase {
 
     /**
      * Verify that
-     * {@link CallsManager#transactionHoldPotentialActiveCallForNewCall(Call, boolean,
-     * OutcomeReceiver)}s OutcomeReceiver returns onResult when there is an active call that
-     * supports hold, and it's a CallControlRequest.
+     * {@link CallsManagerCallSequencingAdapter#transactionHoldPotentialActiveCallForNewCall(Call,
+     * boolean, OutcomeReceiver)}s OutcomeReceiver returns onResult when there is an active call
+     * that supports hold, and it's a CallControlRequest.
      */
     @MediumTest
     @Test
@@ -3124,9 +3127,9 @@ public class CallsManagerTest extends TelecomTestCase {
 
     /**
      * Verify that
-     * {@link CallsManager#transactionHoldPotentialActiveCallForNewCall(Call, boolean,
-     * OutcomeReceiver)}s OutcomeReceiver returns onResult when there is an active call that
-     * supports hold + can hold, and it's a CallControlRequest.
+     * {@link CallsManagerCallSequencingAdapter#transactionHoldPotentialActiveCallForNewCall(Call,
+     * boolean, OutcomeReceiver)}s OutcomeReceiver returns onResult when there is an active call
+     * that supports hold + can hold, and it's a CallControlRequest.
      */
     @MediumTest
     @Test
@@ -3145,9 +3148,9 @@ public class CallsManagerTest extends TelecomTestCase {
 
     /**
      * Verify that
-     * {@link CallsManager#transactionHoldPotentialActiveCallForNewCall(Call, boolean,
-     * OutcomeReceiver)}s OutcomeReceiver returns onResult when there is an active call that
-     * supports hold + can hold, and it's a CallControlCallbackRequest.
+     * {@link CallsManagerCallSequencingAdapter#transactionHoldPotentialActiveCallForNewCall(Call,
+     * boolean, OutcomeReceiver)}s OutcomeReceiver returns onResult when there is an active call
+     * that supports hold + can hold, and it's a CallControlCallbackRequest.
      */
     @MediumTest
     @Test
@@ -3165,9 +3168,9 @@ public class CallsManagerTest extends TelecomTestCase {
 
     /**
      * Verify that
-     * {@link CallsManager#transactionHoldPotentialActiveCallForNewCall(Call, boolean,
-     * OutcomeReceiver)}s OutcomeReceiver returns onResult when there is an active unholdable call,
-     * and it's a CallControlCallbackRequest.
+     * {@link CallsManagerCallSequencingAdapter#transactionHoldPotentialActiveCallForNewCall(Call,
+     * boolean, OutcomeReceiver)}s OutcomeReceiver returns onResult when there is an active
+     * unholdable call, and it's a CallControlCallbackRequest.
      */
     @MediumTest
     @Test
@@ -3775,6 +3778,66 @@ public class CallsManagerTest extends TelecomTestCase {
         inOrder.verify(call).setState(eq(CallState.RINGING), anyString());
     }
 
+    @SmallTest
+    @Test
+    public void testSimultaneousCallType() {
+        when(mFeatureFlags.enableCallSequencing()).thenReturn(true);
+        // Setup CallsManagerCallSequencingAdapter
+        CallSequencingController sequencingController = mock(CallSequencingController.class);
+        CallAudioManager callAudioManager = mock(CallAudioManager.class);
+        CallsManagerCallSequencingAdapter adapter = new CallsManagerCallSequencingAdapter(
+                mCallsManager, mContext, sequencingController, callAudioManager, mFeatureFlags);
+        mCallsManager.setCallSequencingAdapter(adapter);
+        // Explicitly disable simultaneous calling
+        TelephonyManager mockTelephonyManager = mComponentContextFixture.getTelephonyManager();
+        when(mockTelephonyManager.getMaxNumberOfSimultaneouslyActiveSims()).thenReturn(1);
+
+        Call call1 = addSpyCall(SIM_1_HANDLE, CallState.ACTIVE);
+        assertEquals(call1.getSimultaneousType(), Call.CALL_SIMULTANEOUS_DISABLED_SAME_ACCOUNT);
+
+        // Emulate adding another concurrent call on a different call when simultaneous calling
+        // isn't supported by the device.
+        Call call2 = addSpyCall(SIM_2_HANDLE, CallState.ON_HOLD);
+        assertEquals(call1.getSimultaneousType(), Call.CALL_SIMULTANEOUS_DISABLED_DIFF_ACCOUNT);
+        assertEquals(call2.getSimultaneousType(), Call.CALL_SIMULTANEOUS_DISABLED_DIFF_ACCOUNT);
+        mCallsManager.removeCall(call2);
+
+        // Now enable simultaneous calling and verify the updated call simultaneous types when
+        // adding another call.
+        when(mockTelephonyManager.getMaxNumberOfSimultaneouslyActiveSims()).thenReturn(2);
+        call2 = addSpyCall(SIM_1_HANDLE, CallState.ON_HOLD);
+        assertEquals(call1.getSimultaneousType(), Call.CALL_DIRECTION_DUAL_SAME_ACCOUNT);
+        assertEquals(call2.getSimultaneousType(), Call.CALL_DIRECTION_DUAL_SAME_ACCOUNT);
+
+        // Add a new call and remove the held one (emulation).
+        mCallsManager.removeCall(call2);
+        // Verify that the simultaneous call type priority of the 1st call has been upgraded.
+        Call call3 = addSpyCall(SIM_2_HANDLE, CallState.ACTIVE);
+        assertEquals(call1.getSimultaneousType(), Call.CALL_DIRECTION_DUAL_DIFF_ACCOUNT);
+        assertEquals(call3.getSimultaneousType(), Call.CALL_DIRECTION_DUAL_DIFF_ACCOUNT);
+
+        // Remove the first call and add another call with the same handle as the third call.
+        mCallsManager.removeCall(call1);
+        Call call4 = addSpyCall(SIM_2_HANDLE, CallState.ON_HOLD);
+        // Verify that call3's priority remains unchanged but call4's priority is
+        // Call.CALL_DIRECTION_DUAL_SAME_ACCOUNT.
+        assertEquals(call3.getSimultaneousType(), Call.CALL_DIRECTION_DUAL_DIFF_ACCOUNT);
+        assertEquals(call4.getSimultaneousType(), Call.CALL_DIRECTION_DUAL_SAME_ACCOUNT);
+    }
+
+    @SmallTest
+    @Test
+    public void testPendingAccountSelectionNotClearedWithNewCall() {
+        Call ongoingCall = createSpyCall(SIM_1_HANDLE, CallState.ACTIVE);
+        mCallsManager.getPendingAccountSelection().put(ongoingCall.getId(),
+                CompletableFuture.completedFuture(new Pair<>(ongoingCall, SIM_1_HANDLE)));
+        Call pendingCall = createSpyCall(SIM_1_HANDLE, CallState.SELECT_PHONE_ACCOUNT);
+        mCallsManager.getPendingAccountSelection().put(pendingCall.getId(),
+                CompletableFuture.completedFuture(new Pair<>(pendingCall, SIM_1_HANDLE)));
+        mCallsManager.processDisconnectCallAndCleanup(ongoingCall, CallState.DISCONNECTED);
+        assertFalse(mCallsManager.getPendingAccountSelection().containsKey(ongoingCall.getId()));
+        assertTrue(mCallsManager.getPendingAccountSelection().containsKey(pendingCall.getId()));
+    }
 
     private Call addSpyCall() {
         return addSpyCall(SIM_2_HANDLE, CallState.ACTIVE);
@@ -3803,9 +3866,9 @@ public class CallsManagerTest extends TelecomTestCase {
         Call callSpy = Mockito.spy(ongoingCall);
 
         // Mocks some methods to not call the real method.
-        doNothing().when(callSpy).unhold();
-        doNothing().when(callSpy).hold();
-        doNothing().when(callSpy).answer(ArgumentMatchers.anyInt());
+        doReturn(null).when(callSpy).unhold();
+        doReturn(null).when(callSpy).hold();
+        doReturn(null).when(callSpy).answer(ArgumentMatchers.anyInt());
         doNothing().when(callSpy).setStartWithSpeakerphoneOn(ArgumentMatchers.anyBoolean());
 
         mCallsManager.addCall(callSpy);
@@ -3817,10 +3880,10 @@ public class CallsManagerTest extends TelecomTestCase {
         Call callSpy = Mockito.spy(ongoingCall);
 
         // Mocks some methods to not call the real method.
-        doNothing().when(callSpy).unhold();
-        doNothing().when(callSpy).hold();
-        doNothing().when(callSpy).disconnect();
-        doNothing().when(callSpy).answer(ArgumentMatchers.anyInt());
+        doReturn(null).when(callSpy).unhold();
+        doReturn(null).when(callSpy).hold();
+        doReturn(null).when(callSpy).disconnect();
+        doReturn(null).when(callSpy).answer(ArgumentMatchers.anyInt());
         doNothing().when(callSpy).setStartWithSpeakerphoneOn(ArgumentMatchers.anyBoolean());
 
         return callSpy;
@@ -3940,7 +4003,7 @@ public class CallsManagerTest extends TelecomTestCase {
         CountDownLatch latch = new CountDownLatch(1);
         when(mFeatureFlags.transactionalHoldDisconnectsUnholdable()).thenReturn(true);
         when(mConnectionSvrFocusMgr.getCurrentFocusCall()).thenReturn(activeCall);
-        mCallsManager.transactionHoldPotentialActiveCallForNewCall(
+        mCallsManager.getCallSequencingAdapter().transactionHoldPotentialActiveCallForNewCall(
                 newCall,
                 isCallControlRequest,
                 new LatchedOutcomeReceiver(latch, expectOnResult));

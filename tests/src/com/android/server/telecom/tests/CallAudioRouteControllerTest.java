@@ -37,13 +37,13 @@ import static com.android.server.telecom.CallAudioRouteAdapter.STREAMING_FORCE_D
 import static com.android.server.telecom.CallAudioRouteAdapter.STREAMING_FORCE_ENABLED;
 import static com.android.server.telecom.CallAudioRouteAdapter.SWITCH_BASELINE_ROUTE;
 import static com.android.server.telecom.CallAudioRouteAdapter.SWITCH_FOCUS;
+import static com.android.server.telecom.CallAudioRouteAdapter.TOGGLE_MUTE;
 import static com.android.server.telecom.CallAudioRouteAdapter.USER_SWITCH_BASELINE_ROUTE;
 import static com.android.server.telecom.CallAudioRouteAdapter.USER_SWITCH_BLUETOOTH;
 import static com.android.server.telecom.CallAudioRouteAdapter.USER_SWITCH_EARPIECE;
 import static com.android.server.telecom.CallAudioRouteAdapter.USER_SWITCH_HEADSET;
 import static com.android.server.telecom.CallAudioRouteAdapter.USER_SWITCH_SPEAKER;
 import static com.android.server.telecom.CallAudioRouteController.INCLUDE_BLUETOOTH_IN_BASELINE;
-
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -56,6 +56,7 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -67,10 +68,13 @@ import android.bluetooth.BluetoothLeAudio;
 import android.content.BroadcastReceiver;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.media.AudioAttributes;
+import android.media.AudioDeviceAttributes;
 import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
 import android.media.IAudioService;
 import android.media.audiopolicy.AudioProductStrategy;
+import android.os.Looper;
 import android.os.UserHandle;
 import android.telecom.CallAudioState;
 import android.telecom.VideoProfile;
@@ -100,45 +104,60 @@ import org.junit.runners.JUnit4;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 @RunWith(JUnit4.class)
 public class CallAudioRouteControllerTest extends TelecomTestCase {
-    private CallAudioRouteController mController;
-    @Mock WiredHeadsetManager mWiredHeadsetManager;
-    @Mock AudioManager mAudioManager;
-    @Mock AudioDeviceInfo mEarpieceDeviceInfo;
-    @Mock CallsManager mCallsManager;
-    @Mock CallAudioManager.AudioServiceFactory mAudioServiceFactory;
-    @Mock IAudioService mAudioService;
-    @Mock BluetoothRouteManager mBluetoothRouteManager;
-    @Mock BluetoothDeviceManager mBluetoothDeviceManager;
-    @Mock BluetoothAdapter mBluetoothAdapter;
-    @Mock StatusBarNotifier mockStatusBarNotifier;
-    @Mock AudioDeviceInfo mAudioDeviceInfo;
-    @Mock BluetoothLeAudio mBluetoothLeAudio;
-    @Mock CallAudioManager mCallAudioManager;
-    @Mock Call mCall;
-    @Mock private TelecomSystem.SyncRoot mLock;
-    @Mock private TelecomMetricsController mMockTelecomMetricsController;
-    private AudioRoute mEarpieceRoute;
-    private AudioRoute mSpeakerRoute;
-    private boolean mOverrideSpeakerToBus;
     private static final String BT_ADDRESS_1 = "00:00:00:00:00:01";
     private static final BluetoothDevice BLUETOOTH_DEVICE_1 =
             BluetoothRouteManagerTest.makeBluetoothDevice("00:00:00:00:00:01");
-    private static final Set<BluetoothDevice> BLUETOOTH_DEVICES;
-    static {
-        BLUETOOTH_DEVICES = new HashSet<>();
-        BLUETOOTH_DEVICES.add(BLUETOOTH_DEVICE_1);
-    }
+    private static final Set<BluetoothDevice> BLUETOOTH_DEVICES = new HashSet<>();
     private static final int TEST_TIMEOUT = 500;
+
+    @Mock
+    WiredHeadsetManager mWiredHeadsetManager;
+    @Mock
+    AudioManager mAudioManager;
+    @Mock
+    AudioDeviceInfo mEarpieceDeviceInfo;
+    @Mock
+    CallsManager mCallsManager;
+    @Mock
+    CallAudioManager.AudioServiceFactory mAudioServiceFactory;
+    @Mock
+    IAudioService mAudioService;
+    @Mock
+    BluetoothRouteManager mBluetoothRouteManager;
+    @Mock
+    BluetoothDeviceManager mBluetoothDeviceManager;
+    @Mock
+    BluetoothAdapter mBluetoothAdapter;
+    @Mock
+    StatusBarNotifier mockStatusBarNotifier;
+    @Mock
+    AudioDeviceInfo mAudioDeviceInfo;
+    @Mock
+    BluetoothLeAudio mBluetoothLeAudio;
+    @Mock
+    CallAudioManager mCallAudioManager;
+    @Mock
+    Call mCall;
+    private CallAudioRouteController mController;
+    @Mock
+    private TelecomSystem.SyncRoot mLock;
+    @Mock
+    private TelecomMetricsController mMockTelecomMetricsController;
+    private AudioRoute mEarpieceRoute;
+    private AudioRoute mSpeakerRoute;
+    private boolean mOverrideSpeakerToBus;
     AudioRoute.Factory mAudioRouteFactory = new AudioRoute.Factory() {
         @Override
         public AudioRoute create(@AudioRoute.AudioRouteType int type, String bluetoothAddress,
-                                 AudioManager audioManager) {
+                AudioManager audioManager) {
             if (mOverrideSpeakerToBus && type == AudioRoute.TYPE_SPEAKER) {
                 type = AudioRoute.TYPE_BUS;
             }
@@ -152,7 +171,7 @@ public class CallAudioRouteControllerTest extends TelecomTestCase {
         when(mWiredHeadsetManager.isPluggedIn()).thenReturn(false);
         when(mEarpieceDeviceInfo.getType()).thenReturn(AudioDeviceInfo.TYPE_BUILTIN_EARPIECE);
         when(mAudioManager.getDevices(eq(AudioManager.GET_DEVICES_OUTPUTS))).thenReturn(
-                new AudioDeviceInfo[] {
+                new AudioDeviceInfo[]{
                         mEarpieceDeviceInfo
                 });
         when(mAudioManager.getPreferredDeviceForStrategy(nullable(AudioProductStrategy.class)))
@@ -171,7 +190,8 @@ public class CallAudioRouteControllerTest extends TelecomTestCase {
         when(mCallsManager.getLock()).thenReturn(mLock);
         when(mCallsManager.getForegroundCall()).thenReturn(mCall);
         when(mBluetoothRouteManager.getDeviceManager()).thenReturn(mBluetoothDeviceManager);
-        when(mBluetoothDeviceManager.connectAudio(any(BluetoothDevice.class), anyInt()))
+        when(mBluetoothDeviceManager.connectAudio(any(BluetoothDevice.class), anyInt(),
+                anyBoolean()))
                 .thenReturn(true);
         when(mBluetoothDeviceManager.getBluetoothAdapter()).thenReturn(mBluetoothAdapter);
         when(mBluetoothAdapter.getActiveDevices(anyInt())).thenReturn(List.of(BLUETOOTH_DEVICE_1));
@@ -197,12 +217,18 @@ public class CallAudioRouteControllerTest extends TelecomTestCase {
         when(mFeatureFlags.resolveActiveBtRoutingAndBtTimingIssue()).thenReturn(false);
         when(mFeatureFlags.newAudioPathSpeakerBroadcastAndUnfocusedRouting()).thenReturn(false);
         when(mFeatureFlags.fixUserRequestBaselineRouteVideoCall()).thenReturn(false);
+        when(mFeatureFlags.callAudioRoutingPerformanceImprovemenent()).thenReturn(true);
+        BLUETOOTH_DEVICES.add(BLUETOOTH_DEVICE_1);
     }
 
     @After
     public void tearDown() throws Exception {
-        mController.getAdapterHandler().getLooper().quit();
-        mController.getAdapterHandler().getLooper().getThread().join();
+        Looper looper = mController.getAdapterHandler().getLooper();
+        if (looper != Looper.getMainLooper()) {
+            mController.getAdapterHandler().getLooper().quit();
+            mController.getAdapterHandler().getLooper().getThread().join();
+        }
+        BLUETOOTH_DEVICES.clear();
         super.tearDown();
     }
 
@@ -219,7 +245,7 @@ public class CallAudioRouteControllerTest extends TelecomTestCase {
     @Test
     public void testInitializeWithoutEarpiece() {
         when(mAudioManager.getDevices(eq(AudioManager.GET_DEVICES_OUTPUTS))).thenReturn(
-                new AudioDeviceInfo[] {});
+                new AudioDeviceInfo[]{});
 
         mController.initialize();
         assertEquals(mSpeakerRoute, mController.getCurrentRoute());
@@ -234,6 +260,87 @@ public class CallAudioRouteControllerTest extends TelecomTestCase {
         assertEquals(wiredHeadsetRoute, mController.getCurrentRoute());
         assertEquals(2, mController.getAvailableRoutes().size());
         assertTrue(mController.getAvailableRoutes().contains(mSpeakerRoute));
+    }
+
+    @SmallTest
+    @Test
+    public void testEarpieceCreatedWhenWiredHeadsetDisconnected() {
+        // Initialize the controller with the wired headset.
+        AudioRoute wiredHeadsetRoute = new AudioRoute(AudioRoute.TYPE_WIRED, null, null);
+        when(mWiredHeadsetManager.isPluggedIn()).thenReturn(true);
+        mController.initialize();
+        assertEquals(wiredHeadsetRoute, mController.getCurrentRoute());
+        // Verify that the earpiece route isn't created.
+        assertFalse(mController.getAvailableRoutes().contains(mEarpieceRoute));
+        // When we disconnect the wired headset, we should create the earpiece route if it hasn't
+        // already been created.
+        mController.sendMessageWithSessionInfo(DISCONNECT_WIRED_HEADSET);
+        CallAudioState expectedState = new CallAudioState(false, CallAudioState.ROUTE_EARPIECE,
+                CallAudioState.ROUTE_EARPIECE | CallAudioState.ROUTE_SPEAKER, null,
+                new HashSet<>());
+        verify(mCallsManager, timeout(TEST_TIMEOUT)).onCallAudioStateChanged(
+                any(CallAudioState.class), eq(expectedState));
+        // Verify that the earpiece route is created.
+        assertTrue(mController.getAvailableRoutes().contains(mEarpieceRoute));
+    }
+
+    @SmallTest
+    @Test
+    public void testAudioRouteForPreferredDeviceStrategy() {
+        when(mFeatureFlags.updatePreferredAudioDeviceLogic()).thenReturn(true);
+        mController.initialize();
+        mController.sendMessageWithSessionInfo(SWITCH_FOCUS, RINGING_FOCUS, 0);
+        waitForRouteActiveStateAndVerify(true);
+        // Verify preferred device strategy still needs to be used since audio routing hasn't gone
+        // active
+        assertTrue(mController.getUsePreferredDeviceStrategy());
+
+        mController.sendMessageWithSessionInfo(SWITCH_FOCUS, ACTIVE_FOCUS, 0);
+        waitForHandlerAction(mController.getAdapterHandler(), TEST_TIMEOUT);
+        assertTrue(mController.isActive());
+        // Verify that we should no longer are using the preferred device strategy once we process
+        // active focus switch.
+        assertFalse(mController.getUsePreferredDeviceStrategy());
+    }
+
+    @SmallTest
+    @Test
+    public void testAudioRouteCommunicationDeviceSyncWithPreferredDeviceStrategy() {
+        when(mFeatureFlags.updatePreferredAudioDeviceLogic()).thenReturn(true);
+        mController.initialize();
+        // Set up tests so that the current communication device is different from the preferred
+        // device for strategy.
+        AudioDeviceInfo infoCommunicationDevice = mock(AudioDeviceInfo.class);
+        when(infoCommunicationDevice.getType()).thenReturn(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER);
+        mController.setCurrentCommunicationDevice(infoCommunicationDevice);
+        // Setup mocks to test the preferred device strategy.
+        setUpPreferredDeviceMocks();
+
+        mController.sendMessageWithSessionInfo(SWITCH_FOCUS, RINGING_FOCUS, 0);
+        waitForRouteActiveStateAndVerify(true);
+        mController.sendMessageWithSessionInfo(SPEAKER_ON);
+        CallAudioState expectedState = new CallAudioState(false, CallAudioState.ROUTE_SPEAKER,
+                CallAudioState.ROUTE_EARPIECE | CallAudioState.ROUTE_SPEAKER, null,
+                new HashSet<>());
+        verify(mCallsManager, timeout(TEST_TIMEOUT)).onCallAudioStateChanged(
+                any(CallAudioState.class), eq(expectedState));
+
+        // Verify that routing remains unchanged once active focus is processed (we still check
+        // for preferred device strategy). Do note that we still end up using the reported
+        // communication device instead as it's not synced with the preferred device).
+        mController.sendMessageWithSessionInfo(SWITCH_FOCUS, ACTIVE_FOCUS, 0);
+        verify(mCallsManager, timeout(TEST_TIMEOUT).atLeastOnce()).onCallAudioStateChanged(
+                any(CallAudioState.class), eq(expectedState));
+
+        // For sanity, verify that routing falls back on earpiece if focus is switched to active
+        // again (we don't try to use the preferred device strategy).
+        mController.sendMessageWithSessionInfo(SWITCH_FOCUS, ACTIVE_FOCUS, 0);
+        mController.sendMessageWithSessionInfo(SPEAKER_OFF);
+        expectedState = new CallAudioState(false, CallAudioState.ROUTE_EARPIECE,
+                CallAudioState.ROUTE_EARPIECE | CallAudioState.ROUTE_SPEAKER, null,
+                new HashSet<>());
+        verify(mCallsManager, timeout(TEST_TIMEOUT).atLeastOnce()).onCallAudioStateChanged(
+                any(CallAudioState.class), eq(expectedState));
     }
 
     @SmallTest
@@ -367,7 +474,8 @@ public class CallAudioRouteControllerTest extends TelecomTestCase {
     @SmallTest
     @Test
     public void testSwitchFocusForBluetoothDeviceSupportInbandRinging() {
-        when(mBluetoothRouteManager.isInbandRingEnabled(eq(BLUETOOTH_DEVICE_1))).thenReturn(true);
+        when(mBluetoothRouteManager.isInbandRingEnabled(eq(AudioRoute.TYPE_BLUETOOTH_SCO),
+                eq(BLUETOOTH_DEVICE_1))).thenReturn(true);
 
         mController.initialize();
         mController.sendMessageWithSessionInfo(BT_DEVICE_ADDED, AudioRoute.TYPE_BLUETOOTH_SCO,
@@ -384,8 +492,8 @@ public class CallAudioRouteControllerTest extends TelecomTestCase {
 
         mController.sendMessageWithSessionInfo(SWITCH_FOCUS, RINGING_FOCUS, 0);
         verify(mBluetoothDeviceManager, timeout(TEST_TIMEOUT))
-                .connectAudio(BLUETOOTH_DEVICE_1, AudioRoute.TYPE_BLUETOOTH_SCO);
-        assertTrue(mController.isActive());
+                .connectAudio(BLUETOOTH_DEVICE_1, AudioRoute.TYPE_BLUETOOTH_SCO, false);
+        waitForRouteActiveStateAndVerify(true);
 
         mController.sendMessageWithSessionInfo(SWITCH_FOCUS, ACTIVE_FOCUS, 0);
         assertTrue(mController.isActive());
@@ -397,7 +505,7 @@ public class CallAudioRouteControllerTest extends TelecomTestCase {
 
         // Ensure the BT device is disconnected.
         verify(mBluetoothDeviceManager, timeout(TEST_TIMEOUT).atLeastOnce()).disconnectSco();
-        assertFalse(mController.isActive());
+        waitForRouteActiveStateAndVerify(false);
     }
 
     @SmallTest
@@ -417,6 +525,40 @@ public class CallAudioRouteControllerTest extends TelecomTestCase {
                 new HashSet<>());
         verify(mCallsManager, timeout(TEST_TIMEOUT)).onCallAudioStateChanged(
                 any(CallAudioState.class), eq(expectedState));
+    }
+
+    @SmallTest
+    @Test
+    public void testDefaultSpeakerOnWiredHeadsetDisconnect() {
+        mController.initialize();
+        mController.setActive(true);
+        verifyMaybeDefaultSpeakerOnDisconnectWiredHeadset(
+                CallAudioState.ROUTE_SPEAKER /* expectedAudioType */,
+                false /* includeUserSwitch */);
+    }
+
+    @SmallTest
+    @Test
+    public void testIgnoreDefaultSpeakerOnWiredHeadsetDisconnect() {
+        // Note here that the routing isn't active to represent that we're not in a call. If a wired
+        // headset is disconnected and the last route was speaker, we shouldn't switch back to
+        // speaker when we're not in a call.
+        mController.initialize();
+        verifyMaybeDefaultSpeakerOnDisconnectWiredHeadset(
+                CallAudioState.ROUTE_EARPIECE /* expectedAudioType */,
+                false /* includeUserSwitch */);
+    }
+
+    @SmallTest
+    @Test
+    public void testIgnoreDefaultSpeakerOnWiredHeadsetDisconnect_UserSwitchesOutOfSpeaker() {
+        mController.initialize();
+        mController.setActive(true);
+        // Verify that when we turn speaker on/off when a wired headset is plugged in and after the
+        // headset is disconnected that we don't default audio routing back to speaker.
+        verifyMaybeDefaultSpeakerOnDisconnectWiredHeadset(
+                CallAudioState.ROUTE_EARPIECE /* expectedAudioType */,
+                true /* includeUserSwitch */);
     }
 
     @SmallTest
@@ -573,11 +715,11 @@ public class CallAudioRouteControllerTest extends TelecomTestCase {
                 any(CallAudioState.class), eq(expectedState));
 
         mController.sendMessageWithSessionInfo(SPEAKER_ON);
-        verify(mCallsManager, timeout(TEST_TIMEOUT)).onCallAudioStateChanged(
+        verify(mCallsManager, timeout(TEST_TIMEOUT).atLeastOnce()).onCallAudioStateChanged(
                 any(CallAudioState.class), eq(expectedState));
 
         mController.sendMessageWithSessionInfo(CONNECT_WIRED_HEADSET);
-        verify(mCallsManager, timeout(TEST_TIMEOUT)).onCallAudioStateChanged(
+        verify(mCallsManager, timeout(TEST_TIMEOUT).atLeastOnce()).onCallAudioStateChanged(
                 any(CallAudioState.class), eq(expectedState));
 
         mController.sendMessageWithSessionInfo(STREAMING_FORCE_DISABLED);
@@ -619,7 +761,6 @@ public class CallAudioRouteControllerTest extends TelecomTestCase {
         assertTrue(foundValid);
     }
 
-
     @SmallTest
     @Test
     public void testToggleMute() throws Exception {
@@ -644,6 +785,17 @@ public class CallAudioRouteControllerTest extends TelecomTestCase {
         verify(mAudioService, timeout(TEST_TIMEOUT)).setMicrophoneMute(eq(false), anyString(),
                 anyInt(), anyString());
         verify(mCallsManager, timeout(TEST_TIMEOUT)).onCallAudioStateChanged(
+                any(CallAudioState.class), eq(expectedState));
+
+        // Send TOGGLE_MUTE
+        when(mAudioManager.isMicrophoneMute()).thenReturn(false);
+        mController.sendMessageWithSessionInfo(TOGGLE_MUTE);
+        expectedState = new CallAudioState(true, CallAudioState.ROUTE_EARPIECE,
+                CallAudioState.ROUTE_EARPIECE | CallAudioState.ROUTE_SPEAKER, null,
+                new HashSet<>());
+        verify(mAudioService, timeout(TEST_TIMEOUT).atLeastOnce()).setMicrophoneMute(eq(true),
+                anyString(), anyInt(), anyString());
+        verify(mCallsManager, timeout(TEST_TIMEOUT).atLeastOnce()).onCallAudioStateChanged(
                 any(CallAudioState.class), eq(expectedState));
     }
 
@@ -705,7 +857,7 @@ public class CallAudioRouteControllerTest extends TelecomTestCase {
         mController.sendMessageWithSessionInfo(DISCONNECT_WIRED_HEADSET);
         expectedState = new CallAudioState(false, CallAudioState.ROUTE_EARPIECE,
                 CallAudioState.ROUTE_EARPIECE | CallAudioState.ROUTE_SPEAKER
-                        | CallAudioState.ROUTE_BLUETOOTH, null , BLUETOOTH_DEVICES);
+                        | CallAudioState.ROUTE_BLUETOOTH, null, BLUETOOTH_DEVICES);
         verify(mCallsManager, timeout(TEST_TIMEOUT)).onCallAudioStateChanged(
                 any(CallAudioState.class), eq(expectedState));
     }
@@ -713,6 +865,14 @@ public class CallAudioRouteControllerTest extends TelecomTestCase {
     @SmallTest
     @Test
     public void testConnectDisconnectScoDuringCall() {
+        verifyConnectBluetoothDevice(AudioRoute.TYPE_BLUETOOTH_SCO);
+        verifyDisconnectBluetoothDevice(AudioRoute.TYPE_BLUETOOTH_SCO);
+    }
+
+    @SmallTest
+    @Test
+    public void testConnectDisconnectScoDuringCallNoClear() {
+        when(mFeatureFlags.onlyClearCommunicationDeviceOnInactive()).thenReturn(true);
         verifyConnectBluetoothDevice(AudioRoute.TYPE_BLUETOOTH_SCO);
         verifyDisconnectBluetoothDevice(AudioRoute.TYPE_BLUETOOTH_SCO);
     }
@@ -728,7 +888,25 @@ public class CallAudioRouteControllerTest extends TelecomTestCase {
 
     @SmallTest
     @Test
+    public void testConnectAndDisconnectLeDeviceDuringCallNoClear() {
+        when(mFeatureFlags.onlyClearCommunicationDeviceOnInactive()).thenReturn(true);
+        when(mBluetoothLeAudio.getConnectedGroupLeadDevice(anyInt()))
+                .thenReturn(BLUETOOTH_DEVICE_1);
+        verifyConnectBluetoothDevice(AudioRoute.TYPE_BLUETOOTH_LE);
+        verifyDisconnectBluetoothDevice(AudioRoute.TYPE_BLUETOOTH_LE);
+    }
+
+    @SmallTest
+    @Test
     public void testConnectAndDisconnectHearingAidDuringCall() {
+        verifyConnectBluetoothDevice(AudioRoute.TYPE_BLUETOOTH_HA);
+        verifyDisconnectBluetoothDevice(AudioRoute.TYPE_BLUETOOTH_HA);
+    }
+
+    @SmallTest
+    @Test
+    public void testConnectAndDisconnectHearingAidDuringCallNoClear() {
+        when(mFeatureFlags.onlyClearCommunicationDeviceOnInactive()).thenReturn(true);
         verifyConnectBluetoothDevice(AudioRoute.TYPE_BLUETOOTH_HA);
         verifyDisconnectBluetoothDevice(AudioRoute.TYPE_BLUETOOTH_HA);
     }
@@ -775,7 +953,8 @@ public class CallAudioRouteControllerTest extends TelecomTestCase {
     @SmallTest
     @Test
     public void testFallbackWhenBluetoothConnectionFails() {
-        when(mBluetoothDeviceManager.connectAudio(any(BluetoothDevice.class), anyInt()))
+        when(mBluetoothDeviceManager.connectAudio(any(BluetoothDevice.class), anyInt(),
+                anyBoolean()))
                 .thenReturn(false);
 
         AudioDeviceInfo mockAudioDeviceInfo = mock(AudioDeviceInfo.class);
@@ -798,7 +977,7 @@ public class CallAudioRouteControllerTest extends TelecomTestCase {
         mController.sendMessageWithSessionInfo(BT_ACTIVE_DEVICE_PRESENT,
                 AudioRoute.TYPE_BLUETOOTH_SCO, scoDevice.getAddress());
         verify(mBluetoothDeviceManager, timeout(TEST_TIMEOUT))
-                .connectAudio(scoDevice, AudioRoute.TYPE_BLUETOOTH_SCO);
+                .connectAudio(scoDevice, AudioRoute.TYPE_BLUETOOTH_SCO, false);
         expectedState = new CallAudioState(false, CallAudioState.ROUTE_BLUETOOTH,
                 CallAudioState.ROUTE_EARPIECE | CallAudioState.ROUTE_BLUETOOTH
                         | CallAudioState.ROUTE_SPEAKER, BLUETOOTH_DEVICE_1, BLUETOOTH_DEVICES);
@@ -831,35 +1010,36 @@ public class CallAudioRouteControllerTest extends TelecomTestCase {
     public void testRouteFromBtSwitchInRingingSelected() {
         when(mFeatureFlags.ignoreAutoRouteToWatchDevice()).thenReturn(true);
         when(mBluetoothRouteManager.isWatch(any(BluetoothDevice.class))).thenReturn(true);
-        when(mBluetoothRouteManager.isInbandRingEnabled(eq(BLUETOOTH_DEVICE_1))).thenReturn(false);
+        when(mBluetoothRouteManager.isInbandRingEnabled(eq(AudioRoute.TYPE_BLUETOOTH_SCO),
+                eq(BLUETOOTH_DEVICE_1))).thenReturn(false);
 
         mController.initialize();
         mController.sendMessageWithSessionInfo(BT_DEVICE_ADDED, AudioRoute.TYPE_BLUETOOTH_SCO,
-            BLUETOOTH_DEVICE_1);
+                BLUETOOTH_DEVICE_1);
         CallAudioState expectedState = new CallAudioState(false, CallAudioState.ROUTE_EARPIECE,
-            CallAudioState.ROUTE_EARPIECE | CallAudioState.ROUTE_BLUETOOTH
-                | CallAudioState.ROUTE_SPEAKER, null, BLUETOOTH_DEVICES);
+                CallAudioState.ROUTE_EARPIECE | CallAudioState.ROUTE_BLUETOOTH
+                        | CallAudioState.ROUTE_SPEAKER, null, BLUETOOTH_DEVICES);
         verify(mCallsManager, timeout(TEST_TIMEOUT)).onCallAudioStateChanged(
-            any(CallAudioState.class), eq(expectedState));
+                any(CallAudioState.class), eq(expectedState));
 
         mController.sendMessageWithSessionInfo(SWITCH_FOCUS, RINGING_FOCUS, 0);
         assertFalse(mController.isActive());
 
         // BT device should be cached. Verify routing into BT device once focus becomes active.
         mController.sendMessageWithSessionInfo(USER_SWITCH_BLUETOOTH, 0,
-            BLUETOOTH_DEVICE_1.getAddress());
+                BLUETOOTH_DEVICE_1.getAddress());
         expectedState = new CallAudioState(false, CallAudioState.ROUTE_BLUETOOTH,
-            CallAudioState.ROUTE_EARPIECE | CallAudioState.ROUTE_BLUETOOTH
-                | CallAudioState.ROUTE_SPEAKER, BLUETOOTH_DEVICE_1, BLUETOOTH_DEVICES);
+                CallAudioState.ROUTE_EARPIECE | CallAudioState.ROUTE_BLUETOOTH
+                        | CallAudioState.ROUTE_SPEAKER, BLUETOOTH_DEVICE_1, BLUETOOTH_DEVICES);
         verify(mCallsManager, timeout(TEST_TIMEOUT)).onCallAudioStateChanged(
-            any(CallAudioState.class), eq(expectedState));
+                any(CallAudioState.class), eq(expectedState));
         mController.sendMessageWithSessionInfo(SWITCH_FOCUS, ACTIVE_FOCUS, 0);
         mController.sendMessageWithSessionInfo(BT_AUDIO_CONNECTED, 0, BLUETOOTH_DEVICE_1);
         expectedState = new CallAudioState(false, CallAudioState.ROUTE_BLUETOOTH,
-            CallAudioState.ROUTE_EARPIECE | CallAudioState.ROUTE_BLUETOOTH
-                | CallAudioState.ROUTE_SPEAKER, BLUETOOTH_DEVICE_1, BLUETOOTH_DEVICES);
+                CallAudioState.ROUTE_EARPIECE | CallAudioState.ROUTE_BLUETOOTH
+                        | CallAudioState.ROUTE_SPEAKER, BLUETOOTH_DEVICE_1, BLUETOOTH_DEVICES);
         verify(mCallsManager, timeout(TEST_TIMEOUT)).onCallAudioStateChanged(
-            any(CallAudioState.class), eq(expectedState));
+                any(CallAudioState.class), eq(expectedState));
     }
 
     @SmallTest
@@ -936,7 +1116,7 @@ public class CallAudioRouteControllerTest extends TelecomTestCase {
         mController.sendMessageWithSessionInfo(SWITCH_BASELINE_ROUTE,
                 INCLUDE_BLUETOOTH_IN_BASELINE, BLUETOOTH_DEVICE_1.getAddress());
         // Process BT_AUDIO_CONNECTED from connecting to BT device in active focus request.
-        mController.setIsScoAudioConnected(true);
+        mController.setScoAudioConnectedDevice(BLUETOOTH_DEVICE_1);
         mController.sendMessageWithSessionInfo(BT_AUDIO_CONNECTED, 0, BLUETOOTH_DEVICE_1);
         // Verify SCO not disconnected and route stays on connected BT device.
         verify(mBluetoothDeviceManager, timeout(TEST_TIMEOUT).times(0)).disconnectSco();
@@ -1024,11 +1204,11 @@ public class CallAudioRouteControllerTest extends TelecomTestCase {
 
         // Now switch call to active focus so that base route can be recalculated.
         mController.sendMessageWithSessionInfo(SWITCH_FOCUS, ACTIVE_FOCUS, 0);
-        expectedState = new CallAudioState(false, CallAudioState.ROUTE_BLUETOOTH,
-                CallAudioState.ROUTE_EARPIECE | CallAudioState.ROUTE_BLUETOOTH
-                        | CallAudioState.ROUTE_SPEAKER, BLUETOOTH_DEVICE_1, BLUETOOTH_DEVICES);
-        // Verify that audio is still routed into BLUETOOTH_DEVICE_1 and not the 2nd BT device.
-        verify(mCallsManager, timeout(TEST_TIMEOUT)).onCallAudioStateChanged(
+        // Verify that audio is still routed into BLUETOOTH_DEVICE_1 and not the 2nd BT device. Add
+        // atLeastOnce verification because the expected route would've been hit when we first
+        // initially added the scoDevice and is getting captured here along with the invocation
+        // from switching to active focus.
+        verify(mCallsManager, timeout(TEST_TIMEOUT).atLeastOnce()).onCallAudioStateChanged(
                 any(CallAudioState.class), eq(expectedState));
 
         // Clean up BLUETOOTH_DEVICES for subsequent tests.
@@ -1117,7 +1297,7 @@ public class CallAudioRouteControllerTest extends TelecomTestCase {
                 watchDevice);
         CallAudioState expectedState = new CallAudioState(false, CallAudioState.ROUTE_BLUETOOTH,
                 CallAudioState.ROUTE_EARPIECE | CallAudioState.ROUTE_SPEAKER
-                | CallAudioState.ROUTE_BLUETOOTH, BLUETOOTH_DEVICE_1, BLUETOOTH_DEVICES);
+                        | CallAudioState.ROUTE_BLUETOOTH, BLUETOOTH_DEVICE_1, BLUETOOTH_DEVICES);
         verify(mCallsManager, timeout(TEST_TIMEOUT)).onCallAudioStateChanged(
                 any(CallAudioState.class), eq(expectedState));
 
@@ -1156,12 +1336,12 @@ public class CallAudioRouteControllerTest extends TelecomTestCase {
         BLUETOOTH_DEVICES.remove(watchDevice);
     }
 
-
     @Test
     @SmallTest
     public void testAbandonCallAudioFocusAfterCallEnd() {
         // Make sure in-band ringing is disabled so that route never becomes active
-        when(mBluetoothRouteManager.isInbandRingEnabled(eq(BLUETOOTH_DEVICE_1))).thenReturn(false);
+        when(mBluetoothRouteManager.isInbandRingEnabled(eq(AudioRoute.TYPE_BLUETOOTH_SCO),
+                eq(BLUETOOTH_DEVICE_1))).thenReturn(false);
 
         mController.initialize();
         mController.sendMessageWithSessionInfo(BT_DEVICE_ADDED, AudioRoute.TYPE_BLUETOOTH_SCO,
@@ -1189,6 +1369,131 @@ public class CallAudioRouteControllerTest extends TelecomTestCase {
         verify(mCallAudioManager, timeout(TEST_TIMEOUT)).notifyAudioOperationsComplete();
     }
 
+    @Test
+    @SmallTest
+    public void testActiveDevicePresentRoutesOnCurrentActive() {
+        when(mFeatureFlags.resolveActiveBtRoutingAndBtTimingIssue()).thenReturn(true);
+        // Connect first BT device.
+        verifyConnectBluetoothDevice(AudioRoute.TYPE_BLUETOOTH_SCO);
+        // Connect another BT device.
+        String scoDeviceAddress = "00:00:00:00:00:03";
+        BluetoothDevice scoDevice2 =
+                BluetoothRouteManagerTest.makeBluetoothDevice(scoDeviceAddress);
+        BLUETOOTH_DEVICES.add(scoDevice2);
+
+        // Signal second BT device added in controller and verify routing to that device upon
+        // receiving active focus.
+        mController.sendMessageWithSessionInfo(BT_DEVICE_ADDED, AudioRoute.TYPE_BLUETOOTH_SCO,
+                scoDevice2);
+        CallAudioState expectedState = new CallAudioState(false, CallAudioState.ROUTE_BLUETOOTH,
+                CallAudioState.ROUTE_EARPIECE | CallAudioState.ROUTE_SPEAKER
+                        | CallAudioState.ROUTE_BLUETOOTH, BLUETOOTH_DEVICE_1, BLUETOOTH_DEVICES);
+        mController.sendMessageWithSessionInfo(SWITCH_FOCUS, ACTIVE_FOCUS, 0);
+        verify(mCallsManager, timeout(TEST_TIMEOUT)).onCallAudioStateChanged(
+                any(CallAudioState.class), eq(expectedState));
+
+        // Update the currently tracked active device to be BLUETOOTH_DEVICE_1.
+        mController.updateActiveBluetoothDevice(
+                new Pair<>(AudioRoute.TYPE_BLUETOOTH_SCO, BLUETOOTH_DEVICE_1.getAddress()));
+        // Verify that sending BT_ACTIVE_DEVICE_PRESENT when BLUETOOTH_DEVICE_1 isn't the currently
+        // tracked active device, that we ignore routing.
+        mController.sendMessageWithSessionInfo(BT_ACTIVE_DEVICE_PRESENT,
+                AudioRoute.TYPE_BLUETOOTH_SCO, scoDevice2.getAddress());
+        verify(mCallsManager, timeout(TEST_TIMEOUT)).onCallAudioStateChanged(
+                any(CallAudioState.class), eq(expectedState));
+
+        // Now update the active device so that it's scoDevice2 and verify that
+        // BT_ACTIVE_DEVICE_PRESENT is properly processed and that we route into the device.
+        mController.updateActiveBluetoothDevice(
+                new Pair<>(AudioRoute.TYPE_BLUETOOTH_SCO, scoDevice2.getAddress()));
+        mController.sendMessageWithSessionInfo(BT_ACTIVE_DEVICE_PRESENT,
+                AudioRoute.TYPE_BLUETOOTH_SCO, scoDevice2.getAddress());
+        mController.sendMessageWithSessionInfo(BT_AUDIO_DISCONNECTED, 0,
+                BLUETOOTH_DEVICE_1);
+        mController.sendMessageWithSessionInfo(BT_AUDIO_CONNECTED,
+                0, scoDevice2);
+        expectedState = new CallAudioState(false, CallAudioState.ROUTE_BLUETOOTH,
+                CallAudioState.ROUTE_EARPIECE | CallAudioState.ROUTE_SPEAKER
+                        | CallAudioState.ROUTE_BLUETOOTH, scoDevice2, BLUETOOTH_DEVICES);
+        verify(mCallsManager, timeout(TEST_TIMEOUT)).onCallAudioStateChanged(
+                any(CallAudioState.class), eq(expectedState));
+    }
+
+    @Test
+    @SmallTest
+    public void testRouteToInactiveWhenInbandRingingDisabledDuringRinging() {
+        when(mBluetoothRouteManager.isInbandRingEnabled(eq(AudioRoute.TYPE_BLUETOOTH_SCO),
+                eq(BLUETOOTH_DEVICE_1))).thenReturn(true);
+        verifyConnectBluetoothDevice(AudioRoute.TYPE_BLUETOOTH_SCO);
+        mController.sendMessageWithSessionInfo(SWITCH_FOCUS, RINGING_FOCUS, 0);
+        assertTrue(mController.isActive());
+
+        // Connect another HFP device while call is still ringing
+        BluetoothDevice scoDevice =
+                BluetoothRouteManagerTest.makeBluetoothDevice("00:00:00:00:00:03");
+        BLUETOOTH_DEVICES.add(scoDevice);
+
+        // Add SCO device.
+        mController.sendMessageWithSessionInfo(BT_DEVICE_ADDED, AudioRoute.TYPE_BLUETOOTH_SCO,
+                scoDevice);
+        CallAudioState expectedState = new CallAudioState(false, CallAudioState.ROUTE_BLUETOOTH,
+                CallAudioState.ROUTE_EARPIECE | CallAudioState.ROUTE_BLUETOOTH
+                        | CallAudioState.ROUTE_SPEAKER, BLUETOOTH_DEVICE_1, BLUETOOTH_DEVICES);
+        verify(mCallsManager, timeout(TEST_TIMEOUT)).onCallAudioStateChanged(
+                any(CallAudioState.class), eq(expectedState));
+
+        when(mBluetoothRouteManager.isInbandRingEnabled(eq(AudioRoute.TYPE_BLUETOOTH_SCO),
+                any(BluetoothDevice.class))).thenReturn(false);
+        // Emulate second device becoming active and first device getting disconnected as in-band
+        // ringing is disabled.
+        mController.sendMessageWithSessionInfo(BT_ACTIVE_DEVICE_PRESENT,
+                AudioRoute.TYPE_BLUETOOTH_SCO, scoDevice.getAddress());
+        mController.sendMessageWithSessionInfo(BT_AUDIO_DISCONNECTED, 0,
+                BLUETOOTH_DEVICE_1);
+        expectedState = new CallAudioState(false, CallAudioState.ROUTE_BLUETOOTH,
+                CallAudioState.ROUTE_EARPIECE | CallAudioState.ROUTE_BLUETOOTH
+                        | CallAudioState.ROUTE_SPEAKER, scoDevice, BLUETOOTH_DEVICES);
+        // Verify routing goes to the new HFP device but that the routing is now inactive.
+        verify(mCallsManager, timeout(TEST_TIMEOUT)).onCallAudioStateChanged(
+                any(CallAudioState.class), eq(expectedState));
+        assertFalse(mController.isActive());
+    }
+
+    @Test
+    @SmallTest
+    public void testSkipConnectBluetoothWhenScoAudioAlreadyConnected() {
+        verifyConnectBluetoothDevice(AudioRoute.TYPE_BLUETOOTH_SCO);
+        // Connect another HFP device while call is still ringing
+        BluetoothDevice scoDevice =
+                BluetoothRouteManagerTest.makeBluetoothDevice("00:00:00:00:00:03");
+        BLUETOOTH_DEVICES.add(scoDevice);
+
+        // Add SCO device.
+        mController.sendMessageWithSessionInfo(BT_DEVICE_ADDED, AudioRoute.TYPE_BLUETOOTH_SCO,
+                scoDevice);
+        CallAudioState expectedState = new CallAudioState(false, CallAudioState.ROUTE_BLUETOOTH,
+                CallAudioState.ROUTE_EARPIECE | CallAudioState.ROUTE_BLUETOOTH
+                        | CallAudioState.ROUTE_SPEAKER, BLUETOOTH_DEVICE_1, BLUETOOTH_DEVICES);
+        verify(mCallsManager, timeout(TEST_TIMEOUT)).onCallAudioStateChanged(
+                any(CallAudioState.class), eq(expectedState));
+
+        // Emulate scenario where BT stack signals SCO audio connected for the second HFP device
+        // before Telecom finishes processing the route change to this device. We should ensure
+        // that we don't accidentally disconnect SCO in this case (thinking that we're disconnecting
+        // the first HFP device).
+        mController.setScoAudioConnectedDevice(scoDevice);
+        mController.sendMessageWithSessionInfo(BT_ACTIVE_DEVICE_PRESENT,
+                AudioRoute.TYPE_BLUETOOTH_SCO, scoDevice.getAddress());
+        expectedState = new CallAudioState(false, CallAudioState.ROUTE_BLUETOOTH,
+                CallAudioState.ROUTE_EARPIECE | CallAudioState.ROUTE_BLUETOOTH
+                        | CallAudioState.ROUTE_SPEAKER, scoDevice, BLUETOOTH_DEVICES);
+        // Verify routing goes to the new HFP device and we never disconnect SCO when clearing the
+        // original pending route.
+        verify(mCallsManager, timeout(TEST_TIMEOUT)).onCallAudioStateChanged(
+                any(CallAudioState.class), eq(expectedState));
+        verify(mBluetoothDeviceManager, timeout(TEST_TIMEOUT).times(0)).disconnectSco();
+    }
+
     private void verifyConnectBluetoothDevice(int audioType) {
         mController.initialize();
         mController.setActive(true);
@@ -1203,7 +1508,7 @@ public class CallAudioRouteControllerTest extends TelecomTestCase {
         mController.sendMessageWithSessionInfo(BT_ACTIVE_DEVICE_PRESENT, audioType, BT_ADDRESS_1);
         if (audioType == AudioRoute.TYPE_BLUETOOTH_SCO) {
             verify(mBluetoothDeviceManager, timeout(TEST_TIMEOUT))
-                    .connectAudio(BLUETOOTH_DEVICE_1, AudioRoute.TYPE_BLUETOOTH_SCO);
+                    .connectAudio(BLUETOOTH_DEVICE_1, AudioRoute.TYPE_BLUETOOTH_SCO, false);
             mController.sendMessageWithSessionInfo(BT_AUDIO_CONNECTED,
                     0, BLUETOOTH_DEVICE_1);
         } else {
@@ -1239,9 +1544,95 @@ public class CallAudioRouteControllerTest extends TelecomTestCase {
         if (audioType == AudioRoute.TYPE_BLUETOOTH_SCO) {
             verify(mBluetoothDeviceManager, timeout(TEST_TIMEOUT)).disconnectSco();
         } else {
-            verify(mAudioManager, timeout(TEST_TIMEOUT)).clearCommunicationDevice();
+            if (mFeatureFlags.onlyClearCommunicationDeviceOnInactive()) {
+                verify(mAudioManager, timeout(TEST_TIMEOUT).times(2))
+                        .setCommunicationDevice(any(AudioDeviceInfo.class));
+                // Don't use a timeout here because that will cause the test to pause for a long
+                // period of time to verify; the previous verify has a timeout on it, so it will
+                // have already waited for any AudioManager invocations to take place.  Any
+                // potential clear would have happened by now.
+                verify(mAudioManager, never()).clearCommunicationDevice();
+            } else {
+                verify(mAudioManager, timeout(TEST_TIMEOUT)).clearCommunicationDevice();
+            }
         }
         verify(mCallsManager, timeout(TEST_TIMEOUT)).onCallAudioStateChanged(
                 any(CallAudioState.class), eq(expectedState));
+    }
+
+    private void verifyMaybeDefaultSpeakerOnDisconnectWiredHeadset(int expectedAudioType, boolean includeUserSwitch) {
+        // Ensure audio is routed to speaker initially
+        mController.sendMessageWithSessionInfo(SPEAKER_ON);
+        CallAudioState expectedState = new CallAudioState(false, CallAudioState.ROUTE_SPEAKER,
+                CallAudioState.ROUTE_EARPIECE | CallAudioState.ROUTE_SPEAKER, null,
+                new HashSet<>());
+        verify(mCallsManager, timeout(TEST_TIMEOUT)).onCallAudioStateChanged(
+                any(CallAudioState.class), eq(expectedState));
+
+        // Then simulate wired headset being connected after speaker was initially the audio route
+        mController.sendMessageWithSessionInfo(CONNECT_WIRED_HEADSET);
+        mController.sendMessageWithSessionInfo(SPEAKER_OFF);
+        expectedState = new CallAudioState(false, CallAudioState.ROUTE_WIRED_HEADSET,
+                CallAudioState.ROUTE_WIRED_HEADSET | CallAudioState.ROUTE_SPEAKER, null,
+                new HashSet<>());
+        verify(mCallsManager, timeout(TEST_TIMEOUT)).onCallAudioStateChanged(
+                any(CallAudioState.class), eq(expectedState));
+
+        // Emulate scenario with user turning on/off speaker. This is to verify that when the user
+        // switches off speaker that we don't auto route back to speaker when the wired headset
+        // disconnects.
+        if (includeUserSwitch) {
+            // Verify speaker turned on from USER_SWITCH_SPEAKER
+            mController.sendMessageWithSessionInfo(USER_SWITCH_SPEAKER);
+            mController.sendMessageWithSessionInfo(SPEAKER_ON);
+            expectedState = new CallAudioState(false, CallAudioState.ROUTE_SPEAKER,
+                    CallAudioState.ROUTE_WIRED_HEADSET | CallAudioState.ROUTE_SPEAKER, null,
+                    new HashSet<>());
+            verify(mCallsManager, timeout(TEST_TIMEOUT)).onCallAudioStateChanged(
+                    any(CallAudioState.class), eq(expectedState));
+
+            // Verify speaker turned off from turning off speaker
+            mController.sendMessageWithSessionInfo(USER_SWITCH_BASELINE_ROUTE,
+                    INCLUDE_BLUETOOTH_IN_BASELINE);
+            mController.sendMessageWithSessionInfo(SPEAKER_OFF);
+            expectedState = new CallAudioState(false, CallAudioState.ROUTE_WIRED_HEADSET,
+                    CallAudioState.ROUTE_WIRED_HEADSET | CallAudioState.ROUTE_SPEAKER, null,
+                    new HashSet<>());
+            verify(mCallsManager, timeout(TEST_TIMEOUT)).onCallAudioStateChanged(
+                    any(CallAudioState.class), eq(expectedState));
+        }
+
+        // Verify that we route back into speaker once the wired headset disconnects
+        mController.sendMessageWithSessionInfo(DISCONNECT_WIRED_HEADSET);
+        expectedState = new CallAudioState(false, expectedAudioType,
+                CallAudioState.ROUTE_EARPIECE | CallAudioState.ROUTE_SPEAKER, null,
+                new HashSet<>());
+        verify(mCallsManager, timeout(TEST_TIMEOUT)).onCallAudioStateChanged(
+                any(CallAudioState.class), eq(expectedState));
+    }
+
+    private void waitForRouteActiveStateAndVerify(boolean expectActive) {
+        try {
+            if (expectActive) {
+                mController.getAudioActiveCompleteLatch().await(TEST_TIMEOUT,
+                        TimeUnit.MILLISECONDS);
+            } else {
+                mController.getAudioOperationsCompleteLatch().await(TEST_TIMEOUT,
+                        TimeUnit.MILLISECONDS);
+            }
+        } catch (Exception e) {
+            // Catch timeout exception and allow failure below.
+        } finally {
+            assertEquals(mController.isActive(), expectActive);
+        }
+    }
+
+    private void setUpPreferredDeviceMocks() {
+        AudioProductStrategy s = mock(AudioProductStrategy.class);
+        when(s.supportsAudioAttributes(any(AudioAttributes.class))).thenReturn(true);
+        AudioDeviceAttributes deviceAttr = mock(AudioDeviceAttributes.class);
+        when(mAudioManager.getPreferredDeviceForStrategy(any(AudioProductStrategy.class)))
+                .thenReturn(deviceAttr);
+        when(deviceAttr.getType()).thenReturn(AudioDeviceInfo.TYPE_BUILTIN_EARPIECE);
     }
 }

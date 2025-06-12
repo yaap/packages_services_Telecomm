@@ -18,6 +18,7 @@ package com.android.server.telecom.settings;
 
 import android.annotation.Nullable;
 import android.app.ActionBar;
+import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Fragment;
 import android.app.FragmentManager;
@@ -53,6 +54,10 @@ import android.widget.ProgressBar;
 import android.widget.RelativeLayout;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowInsetsCompat;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.server.telecom.R;
@@ -109,6 +114,7 @@ public class BlockedNumbersActivity extends ListActivity
             // set the talkback voice prompt to "Back" instead of "Navigate Up"
             actionBar.setHomeActionContentDescription(R.string.back);
         }
+        SettingsConstants.setupEdgeToEdge(this);
 
         if (!BlockedNumberContract.canCurrentUserBlockNumbers(this)) {
             TextView nonPrimaryUserText = (TextView) findViewById(R.id.non_primary_user);

@@ -28,6 +28,7 @@ import android.content.pm.ResolveInfo;
 import android.net.Uri;
 import android.os.BugreportManager;
 import android.os.DropBoxManager;
+import android.os.Looper;
 import android.os.UserHandle;
 import android.telecom.Log;
 import android.telecom.PhoneAccountHandle;
@@ -48,6 +49,7 @@ import com.android.server.telecom.callfiltering.IncomingCallFilterGraph;
 import com.android.server.telecom.components.UserCallIntentProcessor;
 import com.android.server.telecom.components.UserCallIntentProcessorFactory;
 import com.android.server.telecom.flags.FeatureFlags;
+import com.android.server.telecom.metrics.EventStats;
 import com.android.server.telecom.metrics.TelecomMetricsController;
 import com.android.server.telecom.ui.AudioProcessingNotification;
 import com.android.server.telecom.ui.CallStreamingNotification;
@@ -230,7 +232,8 @@ public class TelecomSystem {
             Executor asyncCallAudioTaskExecutor,
             BlockedNumbersAdapter blockedNumbersAdapter,
             FeatureFlags featureFlags,
-            com.android.internal.telephony.flags.FeatureFlags telephonyFlags) {
+            com.android.internal.telephony.flags.FeatureFlags telephonyFlags,
+            Looper looper) {
         mContext = context.getApplicationContext();
         mFeatureFlags = featureFlags;
         LogUtils.initLogging(mContext);
@@ -264,7 +267,7 @@ public class TelecomSystem {
                     communicationDeviceTracker, featureFlags);
             BluetoothRouteManager bluetoothRouteManager = new BluetoothRouteManager(mContext, mLock,
                     bluetoothDeviceManager, new Timeouts.Adapter(),
-                    communicationDeviceTracker, featureFlags);
+                    communicationDeviceTracker, featureFlags, looper);
             BluetoothStateReceiver bluetoothStateReceiver = new BluetoothStateReceiver(
                     bluetoothDeviceManager, bluetoothRouteManager,
                     communicationDeviceTracker, featureFlags);
@@ -459,7 +462,8 @@ public class TelecomSystem {
             });
             mCallsManager.setIncomingCallNotifier(mIncomingCallNotifier);
 
-            mRespondViaSmsManager = new RespondViaSmsManager(mCallsManager, mLock);
+            mRespondViaSmsManager = new RespondViaSmsManager(mCallsManager, mLock,
+                asyncTaskExecutor, featureFlags);
             mCallsManager.setRespondViaSmsManager(mRespondViaSmsManager);
 
             mContext.registerReceiverAsUser(mUserSwitchedReceiver, UserHandle.ALL,

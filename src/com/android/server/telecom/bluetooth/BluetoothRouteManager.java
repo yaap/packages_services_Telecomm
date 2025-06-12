@@ -26,6 +26,7 @@ import android.bluetooth.BluetoothLeAudio;
 import android.content.Context;
 import android.media.AudioDeviceInfo;
 import android.os.Message;
+import android.os.Looper;
 import android.telecom.Log;
 import android.telecom.Logging.Session;
 import android.util.Pair;
@@ -36,6 +37,7 @@ import com.android.internal.os.SomeArgs;
 import com.android.internal.util.IState;
 import com.android.internal.util.State;
 import com.android.internal.util.StateMachine;
+import com.android.server.telecom.AudioRoute;
 import com.android.server.telecom.CallAudioCommunicationDeviceTracker;
 import com.android.server.telecom.TelecomSystem;
 import com.android.server.telecom.Timeouts;
@@ -607,8 +609,8 @@ public class BluetoothRouteManager extends StateMachine {
     public BluetoothRouteManager(Context context, TelecomSystem.SyncRoot lock,
             BluetoothDeviceManager deviceManager, Timeouts.Adapter timeoutsAdapter,
             CallAudioCommunicationDeviceTracker communicationDeviceTracker,
-            FeatureFlags featureFlags) {
-        super(BluetoothRouteManager.class.getSimpleName());
+            FeatureFlags featureFlags, Looper looper) {
+        super(BluetoothRouteManager.class.getSimpleName(), looper);
         mContext = context;
         mLock = lock;
         mDeviceManager = deviceManager;
@@ -1177,6 +1179,11 @@ public class BluetoothRouteManager extends StateMachine {
     @VisibleForTesting
     public boolean isInbandRingEnabled(BluetoothDevice bluetoothDevice) {
         return mDeviceManager.isInbandRingEnabled(bluetoothDevice);
+    }
+
+    public boolean isInbandRingEnabled(@AudioRoute.AudioRouteType int audioRouteType,
+            BluetoothDevice bluetoothDevice) {
+        return mDeviceManager.isInbandRingEnabled(audioRouteType, bluetoothDevice);
     }
 
     private boolean addDevice(String address) {

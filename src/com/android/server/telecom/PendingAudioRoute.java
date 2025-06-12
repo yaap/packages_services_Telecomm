@@ -70,8 +70,24 @@ public class PendingAudioRoute {
         mCommunicationDeviceType = AudioRoute.TYPE_INVALID;
     }
 
-    void setOrigRoute(boolean active, AudioRoute origRoute) {
-        origRoute.onOrigRouteAsPendingRoute(active, this, mAudioManager, mBluetoothRouteManager);
+    /**
+     * Sets the originating route information, and begins the process of transitioning OUT of the
+     * originating route.
+     * Note: We also pass in whether the destination route is going to be active.  This is so that
+     * {@link AudioRoute#onOrigRouteAsPendingRoute(boolean, PendingAudioRoute, AudioManager,
+     * BluetoothRouteManager)} knows whether or not the destination route will be active or not and
+     * can determine whether or not it needs to call {@link AudioManager#clearCommunicationDevice()}
+     * or not.  To optimize audio performance we only need to clear the communication device if the
+     * end result is going to be that we are in an inactive state.
+     * @param isOriginActive Whether the origin is active.
+     * @param origRoute The origin.
+     * @param isDestActive Whether the destination will be active.
+     */
+    void setOrigRoute(boolean isOriginActive, AudioRoute origRoute, boolean isDestActive,
+            boolean isScoAlreadyConnected) {
+        mActive = isDestActive;
+        origRoute.onOrigRouteAsPendingRoute(isOriginActive, this, mAudioManager,
+                mBluetoothRouteManager, isScoAlreadyConnected);
         mOrigRoute = origRoute;
     }
 
@@ -80,9 +96,9 @@ public class PendingAudioRoute {
     }
 
     void setDestRoute(boolean active, AudioRoute destRoute, BluetoothDevice device,
-            boolean isScoAudioConnected) {
+            boolean isScoAlreadyConnected) {
         destRoute.onDestRouteAsPendingRoute(active, this, device,
-                mAudioManager, mBluetoothRouteManager, isScoAudioConnected);
+                mAudioManager, mBluetoothRouteManager, isScoAlreadyConnected);
         mActive = active;
         mDestRoute = destRoute;
     }
@@ -134,6 +150,10 @@ public class PendingAudioRoute {
         return mPendingMessages;
     }
 
+    /**
+     * Whether the destination {@link #getDestRoute()} will be active or not.
+     * @return {@code true} if destination will be active, {@code false} otherwise.
+     */
     public boolean isActive() {
         return mActive;
     }
@@ -153,5 +173,15 @@ public class PendingAudioRoute {
 
     public FeatureFlags getFeatureFlags() {
         return mFeatureFlags;
+    }
+
+    @Override
+    public String toString() {
+        return "PendingAudioRoute{" +
+                ", mOrigRoute=" + mOrigRoute +
+                ", mDestRoute=" + mDestRoute +
+                ", mActive=" + mActive +
+                ", mCommunicationDeviceType=" + mCommunicationDeviceType +
+                '}';
     }
 }

@@ -63,6 +63,7 @@ import com.android.server.telecom.ConnectionServiceWrapper;
 import com.android.server.telecom.PhoneNumberUtilsAdapter;
 import com.android.server.telecom.TelecomSystem;
 import com.android.server.telecom.callsequencing.CallTransactionResult;
+import com.android.server.telecom.callsequencing.CallsManagerCallSequencingAdapter;
 import com.android.server.telecom.callsequencing.TransactionManager;
 import com.android.server.telecom.callsequencing.VerifyCallStateChangeTransaction;
 import com.android.server.telecom.callsequencing.voip.EndCallTransaction;
@@ -97,6 +98,7 @@ public class TransactionTests extends TelecomTestCase {
     @Mock private Call mMockCall1;
     @Mock private Context mMockContext;
     @Mock private CallsManager mCallsManager;
+    @Mock private CallsManagerCallSequencingAdapter mCallSequencingAdapter;
     @Mock private ToastFactory mToastFactory;
     @Mock private ClockProxy mClockProxy;
     @Mock private PhoneNumberUtilsAdapter mPhoneNumberUtilsAdapter;
@@ -113,6 +115,7 @@ public class TransactionTests extends TelecomTestCase {
         MockitoAnnotations.initMocks(this);
         Mockito.when(mMockCall1.getId()).thenReturn(CALL_ID_1);
         Mockito.when(mMockContext.getResources()).thenReturn(Mockito.mock(Resources.class));
+        when(mCallsManager.getCallSequencingAdapter()).thenReturn(mCallSequencingAdapter);
     }
 
     @Override
@@ -220,7 +223,7 @@ public class TransactionTests extends TelecomTestCase {
         transaction.processTransaction(null);
 
         // THEN
-        verify(mCallsManager, times(1))
+        verify(mCallsManager.getCallSequencingAdapter(), times(1))
                 .transactionHoldPotentialActiveCallForNewCall(eq(mMockCall1), eq(false),
                         isA(OutcomeReceiver.class));
     }
@@ -292,20 +295,21 @@ public class TransactionTests extends TelecomTestCase {
                 .setCallType(CallAttributes.VIDEO_CALL)
                 .build();
 
+        Bundle extras = new Bundle();
         OutgoingCallTransaction t = new OutgoingCallTransaction(null,
-                mContext, null, mCallsManager, new Bundle(), mFeatureFlags);
+                mContext, null, mCallsManager, extras, mFeatureFlags);
 
         // WHEN
         when(mFeatureFlags.transactionalVideoState()).thenReturn(true);
         t.setFeatureFlags(mFeatureFlags);
 
         // THEN
-        assertEquals(VideoProfile.STATE_AUDIO_ONLY, t
-                .generateExtras(audioOnlyAttributes)
+        assertEquals(VideoProfile.STATE_AUDIO_ONLY, OutgoingCallTransaction
+                .generateExtras(null, extras, audioOnlyAttributes, mFeatureFlags)
                 .getInt(TelecomManager.EXTRA_START_CALL_WITH_VIDEO_STATE));
 
-        assertEquals(VideoProfile.STATE_BIDIRECTIONAL, t
-                .generateExtras(videoAttributes)
+        assertEquals(VideoProfile.STATE_BIDIRECTIONAL, OutgoingCallTransaction
+                .generateExtras(null, extras, videoAttributes, mFeatureFlags)
                 .getInt(TelecomManager.EXTRA_START_CALL_WITH_VIDEO_STATE));
     }
 
@@ -448,9 +452,9 @@ public class TransactionTests extends TelecomTestCase {
         callSpy.setState(initialState, "manual set in test");
 
         // Mocks some methods to not call the real method.
-        doNothing().when(callSpy).unhold();
-        doNothing().when(callSpy).hold();
-        doNothing().when(callSpy).disconnect();
+        doReturn(null).when(callSpy).unhold();
+        doReturn(null).when(callSpy).hold();
+        doReturn(null).when(callSpy).disconnect();
 
         return callSpy;
     }

@@ -42,6 +42,7 @@ import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.os.Looper;
+import android.telecom.DisconnectCause;
 import android.telecom.PhoneAccount;
 import android.telecom.PhoneAccountHandle;
 import android.util.StatsEvent;
@@ -55,6 +56,7 @@ import com.android.server.telecom.metrics.ApiStats;
 import com.android.server.telecom.metrics.AudioRouteStats;
 import com.android.server.telecom.metrics.CallStats;
 import com.android.server.telecom.metrics.ErrorStats;
+import com.android.server.telecom.metrics.EventStats;
 import com.android.server.telecom.nano.PulledAtomsClass;
 
 import org.junit.After;
@@ -104,6 +106,10 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
     private static final int VALUE_ERROR_ID = 1;
     private static final int VALUE_ERROR_COUNT = 1;
 
+    private static final int VALUE_EVENT_ID = 1;
+    private static final int VALUE_CAUSE_ID = 1;
+    private static final int VALUE_EVENT_COUNT = 1;
+
     @Rule
     public TemporaryFolder mTempFolder = new TemporaryFolder();
     @Mock
@@ -145,22 +151,22 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
     public void testNewPulledAtomsFromFileInvalid() throws Exception {
         mTempFile.delete();
 
-        ApiStats apiStats = new ApiStats(mSpyContext, mLooper);
+        ApiStats apiStats = new ApiStats(mSpyContext, mLooper, false);
 
         assertNotNull(apiStats.mPulledAtoms);
         assertEquals(apiStats.mPulledAtoms.telecomApiStats.length, 0);
 
-        AudioRouteStats audioRouteStats = new AudioRouteStats(mSpyContext, mLooper);
+        AudioRouteStats audioRouteStats = new AudioRouteStats(mSpyContext, mLooper, false);
 
         assertNotNull(audioRouteStats.mPulledAtoms);
         assertEquals(audioRouteStats.mPulledAtoms.callAudioRouteStats.length, 0);
 
-        CallStats callStats = new CallStats(mSpyContext, mLooper);
+        CallStats callStats = new CallStats(mSpyContext, mLooper, false);
 
         assertNotNull(callStats.mPulledAtoms);
         assertEquals(callStats.mPulledAtoms.callStats.length, 0);
 
-        ErrorStats errorStats = new ErrorStats(mSpyContext, mLooper);
+        ErrorStats errorStats = new ErrorStats(mSpyContext, mLooper, false);
 
         assertNotNull(errorStats.mPulledAtoms);
         assertEquals(errorStats.mPulledAtoms.telecomErrorStats.length, 0);
@@ -169,30 +175,35 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
     @Test
     public void testNewPulledAtomsFromFileValid() throws Exception {
         createTestFileForApiStats(DEFAULT_TIMESTAMPS_MILLIS);
-        ApiStats apiStats = new ApiStats(mSpyContext, mLooper);
+        ApiStats apiStats = new ApiStats(mSpyContext, mLooper, false);
 
         verifyTestDataForApiStats(apiStats.mPulledAtoms, DEFAULT_TIMESTAMPS_MILLIS);
 
         createTestFileForAudioRouteStats(DEFAULT_TIMESTAMPS_MILLIS);
-        AudioRouteStats audioRouteStats = new AudioRouteStats(mSpyContext, mLooper);
+        AudioRouteStats audioRouteStats = new AudioRouteStats(mSpyContext, mLooper, false);
 
         verifyTestDataForAudioRouteStats(audioRouteStats.mPulledAtoms, DEFAULT_TIMESTAMPS_MILLIS);
 
         createTestFileForCallStats(DEFAULT_TIMESTAMPS_MILLIS);
-        CallStats callStats = new CallStats(mSpyContext, mLooper);
+        CallStats callStats = new CallStats(mSpyContext, mLooper, false);
 
         verifyTestDataForCallStats(callStats.mPulledAtoms, DEFAULT_TIMESTAMPS_MILLIS);
 
         createTestFileForErrorStats(DEFAULT_TIMESTAMPS_MILLIS);
-        ErrorStats errorStats = new ErrorStats(mSpyContext, mLooper);
+        ErrorStats errorStats = new ErrorStats(mSpyContext, mLooper, false);
 
         verifyTestDataForErrorStats(errorStats.mPulledAtoms, DEFAULT_TIMESTAMPS_MILLIS);
+
+        createTestFileForEventStats(DEFAULT_TIMESTAMPS_MILLIS);
+        EventStats eventStats = new EventStats(mSpyContext, mLooper, false);
+
+        verifyTestDataForEventStats(eventStats.mPulledAtoms, DEFAULT_TIMESTAMPS_MILLIS);
     }
 
     @Test
     public void testPullApiStatsLessThanMinPullIntervalShouldSkip() throws Exception {
         createTestFileForApiStats(System.currentTimeMillis() - MIN_PULL_INTERVAL_MILLIS / 2);
-        ApiStats apiStats = spy(new ApiStats(mSpyContext, mLooper));
+        ApiStats apiStats = spy(new ApiStats(mSpyContext, mLooper, false));
         final List<StatsEvent> data = new ArrayList<>();
 
         int result = apiStats.pull(data);
@@ -205,7 +216,7 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
     @Test
     public void testPullApiStatsGreaterThanMinPullIntervalShouldNotSkip() throws Exception {
         createTestFileForApiStats(System.currentTimeMillis() - MIN_PULL_INTERVAL_MILLIS - 1);
-        ApiStats apiStats = spy(new ApiStats(mSpyContext, mLooper));
+        ApiStats apiStats = spy(new ApiStats(mSpyContext, mLooper, false));
         final List<StatsEvent> data = new ArrayList<>();
         int sizePulled = apiStats.mPulledAtoms.telecomApiStats.length;
 
@@ -220,7 +231,7 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
     @Test
     public void testPullAudioRouteStatsLessThanMinPullIntervalShouldSkip() throws Exception {
         createTestFileForAudioRouteStats(System.currentTimeMillis() - MIN_PULL_INTERVAL_MILLIS / 2);
-        AudioRouteStats audioRouteStats = spy(new AudioRouteStats(mSpyContext, mLooper));
+        AudioRouteStats audioRouteStats = spy(new AudioRouteStats(mSpyContext, mLooper, false));
         final List<StatsEvent> data = new ArrayList<>();
 
         int result = audioRouteStats.pull(data);
@@ -233,7 +244,7 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
     @Test
     public void testPullAudioRouteStatsGreaterThanMinPullIntervalShouldNotSkip() throws Exception {
         createTestFileForAudioRouteStats(System.currentTimeMillis() - MIN_PULL_INTERVAL_MILLIS - 1);
-        AudioRouteStats audioRouteStats = spy(new AudioRouteStats(mSpyContext, mLooper));
+        AudioRouteStats audioRouteStats = spy(new AudioRouteStats(mSpyContext, mLooper, false));
         final List<StatsEvent> data = new ArrayList<>();
         int sizePulled = audioRouteStats.mPulledAtoms.callAudioRouteStats.length;
 
@@ -248,7 +259,7 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
     @Test
     public void testPullCallStatsLessThanMinPullIntervalShouldSkip() throws Exception {
         createTestFileForCallStats(System.currentTimeMillis() - MIN_PULL_INTERVAL_MILLIS / 2);
-        CallStats callStats = spy(new CallStats(mSpyContext, mLooper));
+        CallStats callStats = spy(new CallStats(mSpyContext, mLooper, false));
         final List<StatsEvent> data = new ArrayList<>();
 
         int result = callStats.pull(data);
@@ -261,7 +272,7 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
     @Test
     public void testPullCallStatsGreaterThanMinPullIntervalShouldNotSkip() throws Exception {
         createTestFileForCallStats(System.currentTimeMillis() - MIN_PULL_INTERVAL_MILLIS - 1);
-        CallStats callStats = spy(new CallStats(mSpyContext, mLooper));
+        CallStats callStats = spy(new CallStats(mSpyContext, mLooper, false));
         final List<StatsEvent> data = new ArrayList<>();
         int sizePulled = callStats.mPulledAtoms.callStats.length;
 
@@ -276,7 +287,7 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
     @Test
     public void testPullErrorStatsLessThanMinPullIntervalShouldSkip() throws Exception {
         createTestFileForErrorStats(System.currentTimeMillis() - MIN_PULL_INTERVAL_MILLIS / 2);
-        ErrorStats errorStats = spy(new ErrorStats(mSpyContext, mLooper));
+        ErrorStats errorStats = spy(new ErrorStats(mSpyContext, mLooper, false));
         final List<StatsEvent> data = new ArrayList<>();
 
         int result = errorStats.pull(data);
@@ -289,7 +300,7 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
     @Test
     public void testPullErrorStatsGreaterThanMinPullIntervalShouldNotSkip() throws Exception {
         createTestFileForErrorStats(System.currentTimeMillis() - MIN_PULL_INTERVAL_MILLIS - 1);
-        ErrorStats errorStats = spy(new ErrorStats(mSpyContext, mLooper));
+        ErrorStats errorStats = spy(new ErrorStats(mSpyContext, mLooper, false));
         final List<StatsEvent> data = new ArrayList<>();
         int sizePulled = errorStats.mPulledAtoms.telecomErrorStats.length;
 
@@ -303,7 +314,7 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
 
     @Test
     public void testApiStatsLogCount() throws Exception {
-        ApiStats apiStats = spy(new ApiStats(mSpyContext, mLooper));
+        ApiStats apiStats = spy(new ApiStats(mSpyContext, mLooper, false));
         ApiStats.ApiEvent event = new ApiStats.ApiEvent(VALUE_API_ID, VALUE_UID, VALUE_API_RESULT);
 
         for (int i = 0; i < 10; i++) {
@@ -384,7 +395,7 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
         };
         final int[] results = {ApiStats.RESULT_UNKNOWN, ApiStats.RESULT_NORMAL,
                 ApiStats.RESULT_EXCEPTION, ApiStats.RESULT_PERMISSION};
-        ApiStats apiStats = spy(new ApiStats(mSpyContext, mLooper));
+        ApiStats apiStats = spy(new ApiStats(mSpyContext, mLooper, false));
         Random rand = new Random();
         Map<ApiStats.ApiEvent, Integer> eventMap = new HashMap<>();
 
@@ -408,7 +419,7 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
 
     @Test
     public void testAudioRouteStatsLog() throws Exception {
-        AudioRouteStats audioRouteStats = spy(new AudioRouteStats(mSpyContext, mLooper));
+        AudioRouteStats audioRouteStats = spy(new AudioRouteStats(mSpyContext, mLooper, false));
 
         audioRouteStats.log(VALUE_AUDIO_ROUTE_TYPE1, VALUE_AUDIO_ROUTE_TYPE2, true, false,
                 VALUE_AUDIO_ROUTE_LATENCY);
@@ -436,7 +447,7 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
     @Test
     public void testAudioRouteStatsOnEnterThenExit() throws Exception {
         int latency = 500;
-        AudioRouteStats audioRouteStats = spy(new AudioRouteStats(mSpyContext, mLooper));
+        AudioRouteStats audioRouteStats = spy(new AudioRouteStats(mSpyContext, mLooper, false));
 
         audioRouteStats.onRouteEnter(mMockPendingAudioRoute);
         waitForHandlerActionDelayed(audioRouteStats, TEST_TIMEOUT, latency);
@@ -466,7 +477,7 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
         int delay = 100;
         int latency = 500;
         int duration = 1000;
-        AudioRouteStats audioRouteStats = spy(new AudioRouteStats(mSpyContext, mLooper));
+        AudioRouteStats audioRouteStats = spy(new AudioRouteStats(mSpyContext, mLooper, false));
 
         audioRouteStats.onRouteEnter(mMockPendingAudioRoute);
         waitForHandlerActionDelayed(audioRouteStats, TEST_TIMEOUT, latency);
@@ -502,7 +513,7 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
     public void testAudioRouteStatsOnRevertToSourceBeyondThreshold() throws Exception {
         int delay = 100;
         int latency = 500;
-        AudioRouteStats audioRouteStats = spy(new AudioRouteStats(mSpyContext, mLooper));
+        AudioRouteStats audioRouteStats = spy(new AudioRouteStats(mSpyContext, mLooper, false));
 
         audioRouteStats.onRouteEnter(mMockPendingAudioRoute);
         waitForHandlerActionDelayed(audioRouteStats, TEST_TIMEOUT, latency);
@@ -540,7 +551,7 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
         int delay = 100;
         int latency = 500;
         int duration = 1000;
-        AudioRouteStats audioRouteStats = spy(new AudioRouteStats(mSpyContext, mLooper));
+        AudioRouteStats audioRouteStats = spy(new AudioRouteStats(mSpyContext, mLooper, false));
 
         audioRouteStats.onRouteEnter(mMockPendingAudioRoute);
         waitForHandlerActionDelayed(audioRouteStats, TEST_TIMEOUT, latency);
@@ -575,7 +586,7 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
     @Test
     public void testAudioRouteStatsOnMultipleEnterWithoutExit() throws Exception {
         int latency = 500;
-        AudioRouteStats audioRouteStats = spy(new AudioRouteStats(mSpyContext, mLooper));
+        AudioRouteStats audioRouteStats = spy(new AudioRouteStats(mSpyContext, mLooper, false));
 
         audioRouteStats.onRouteEnter(mMockPendingAudioRoute);
         waitForHandlerActionDelayed(audioRouteStats, TEST_TIMEOUT, latency);
@@ -596,7 +607,7 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
     @Test
     public void testAudioRouteStatsOnMultipleEnterWithExit() throws Exception {
         int latency = 500;
-        AudioRouteStats audioRouteStats = spy(new AudioRouteStats(mSpyContext, mLooper));
+        AudioRouteStats audioRouteStats = spy(new AudioRouteStats(mSpyContext, mLooper, false));
 
         audioRouteStats.onRouteEnter(mMockPendingAudioRoute);
         waitForHandlerActionDelayed(audioRouteStats, TEST_TIMEOUT, latency);
@@ -619,7 +630,7 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
     @Test
     public void testAudioRouteStatsOnRouteToSameDestWithExit() throws Exception {
         int latency = 500;
-        AudioRouteStats audioRouteStats = spy(new AudioRouteStats(mSpyContext, mLooper));
+        AudioRouteStats audioRouteStats = spy(new AudioRouteStats(mSpyContext, mLooper, false));
         doReturn(mMockSourceRoute).when(mMockPendingAudioRoute).getDestRoute();
 
         audioRouteStats.onRouteEnter(mMockPendingAudioRoute);
@@ -640,7 +651,7 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
 
     @Test
     public void testCallStatsLog() throws Exception {
-        CallStats callStats = spy(new CallStats(mSpyContext, mLooper));
+        CallStats callStats = spy(new CallStats(mSpyContext, mLooper, false));
 
         callStats.log(VALUE_CALL_DIRECTION, false, false, true, VALUE_CALL_ACCOUNT_TYPE,
                 VALUE_UID, VALUE_CALL_DURATION);
@@ -681,6 +692,9 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
         doReturn(cn).when(handle).getComponentName();
         Call call = mock(Call.class);
         doReturn(true).when(call).isIncoming();
+        doReturn(new DisconnectCause(0)).when(call).getDisconnectCause();
+        doReturn(0).when(call).getSimultaneousType();
+        doReturn(false).when(call).hasVideoCall();
         doReturn(account).when(call).getPhoneAccountFromHandle();
         doReturn((long) duration).when(call).getAgeMillis();
         doReturn(false).when(account).hasCapabilities(eq(PhoneAccount.CAPABILITY_SELF_MANAGED));
@@ -688,7 +702,7 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
         doReturn(true).when(account).hasCapabilities(eq(PhoneAccount.CAPABILITY_SIM_SUBSCRIPTION));
         doReturn(callingPackage).when(call).getCallingPackageIdentity();
         doReturn(handle).when(call).getTargetPhoneAccount();
-        CallStats callStats = spy(new CallStats(mSpyContext, mLooper));
+        CallStats callStats = spy(new CallStats(mSpyContext, mLooper, false));
 
         callStats.onCallStart(call);
         waitForHandlerAction(callStats, TEST_TIMEOUT);
@@ -698,7 +712,7 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
 
         verify(callStats, times(1)).log(eq(CALL_STATS__CALL_DIRECTION__DIR_INCOMING),
                 eq(false), eq(false), eq(false), eq(CALL_STATS__ACCOUNT_TYPE__ACCOUNT_SIM),
-                eq(fakeUid), eq(duration));
+                eq(fakeUid), eq(0), eq(0), eq(false), eq(duration));
     }
 
     @Test
@@ -719,6 +733,9 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
         doReturn(cn).when(handle).getComponentName();
         Call call = mock(Call.class);
         doReturn(true).when(call).isIncoming();
+        doReturn(new DisconnectCause(0)).when(call).getDisconnectCause();
+        doReturn(0).when(call).getSimultaneousType();
+        doReturn(false).when(call).hasVideoCall();
         doReturn(account).when(call).getPhoneAccountFromHandle();
         doReturn((long) duration).when(call).getAgeMillis();
         doReturn(false).when(account).hasCapabilities(eq(PhoneAccount.CAPABILITY_SELF_MANAGED));
@@ -726,7 +743,7 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
         doReturn(true).when(account).hasCapabilities(eq(PhoneAccount.CAPABILITY_SIM_SUBSCRIPTION));
         doReturn(callingPackage).when(call).getCallingPackageIdentity();
         doReturn(handle).when(call).getTargetPhoneAccount();
-        CallStats callStats = spy(new CallStats(mSpyContext, mLooper));
+        CallStats callStats = spy(new CallStats(mSpyContext, mLooper, false));
 
         callStats.onCallStart(call);
         waitForHandlerAction(callStats, TEST_TIMEOUT);
@@ -739,12 +756,12 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
 
         verify(callStats, times(1)).log(eq(CALL_STATS__CALL_DIRECTION__DIR_INCOMING),
                 eq(false), eq(false), eq(true), eq(CALL_STATS__ACCOUNT_TYPE__ACCOUNT_SIM),
-                eq(fakeUid), eq(duration));
+                eq(fakeUid), eq(0), eq(0), eq(false), eq(duration));
     }
 
     @Test
     public void testErrorStatsLogCount() throws Exception {
-        ErrorStats errorStats = spy(new ErrorStats(mSpyContext, mLooper));
+        ErrorStats errorStats = spy(new ErrorStats(mSpyContext, mLooper, false));
         for (int i = 0; i < 10; i++) {
             errorStats.log(VALUE_MODULE_ID, VALUE_ERROR_ID);
             waitForHandlerAction(errorStats, TEST_TIMEOUT);
@@ -760,7 +777,7 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
 
     @Test
     public void testErrorStatsLogEvent() throws Exception {
-        ErrorStats errorStats = spy(new ErrorStats(mSpyContext, mLooper));
+        ErrorStats errorStats = spy(new ErrorStats(mSpyContext, mLooper, false));
         int[] modules = {
                 ErrorStats.SUB_UNKNOWN,
                 ErrorStats.SUB_CALL_AUDIO,
@@ -820,6 +837,142 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
             assertEquals(errorStats.mPulledAtoms.telecomErrorStats.length, eventMap.size());
             assertTrue(hasMessageForErrorStats(
                     errorStats.mPulledAtoms.telecomErrorStats, module, error, eventMap.get(key)));
+        }
+    }
+
+    @Test
+    public void testApiStatsWithTestModeOn() throws Exception {
+        final List<StatsEvent> data = new ArrayList<>();
+        ApiStats apiStats = spy(new ApiStats(mSpyContext, mLooper, true));
+        apiStats.pull(data);
+        apiStats.flush();
+
+        verify(mSpyContext, never()).getFileStreamPath(anyString());
+        verify(apiStats, times(1)).onPull(any());
+        verify(mSpyContext, never()).openFileOutput(anyString(), anyInt());
+    }
+
+    @Test
+    public void testAudioRouteStatsWithTestModeOn() throws Exception {
+        final List<StatsEvent> data = new ArrayList<>();
+        AudioRouteStats audioRouteStats = spy(new AudioRouteStats(mSpyContext, mLooper, true));
+        audioRouteStats.pull(data);
+        audioRouteStats.flush();
+
+        verify(mSpyContext, never()).getFileStreamPath(anyString());
+        verify(audioRouteStats, times(1)).onPull(any());
+        verify(mSpyContext, never()).openFileOutput(anyString(), anyInt());
+    }
+
+    @Test
+    public void testCallStatsWithTestModeOn() throws Exception {
+        final List<StatsEvent> data = new ArrayList<>();
+        CallStats callStats = spy(new CallStats(mSpyContext, mLooper, true));
+        callStats.pull(data);
+        callStats.flush();
+
+        verify(mSpyContext, never()).getFileStreamPath(anyString());
+        verify(callStats, times(1)).onPull(any());
+        verify(mSpyContext, never()).openFileOutput(anyString(), anyInt());
+    }
+
+    @Test
+    public void testErrorStatsWithTestModeOn() throws Exception {
+        final List<StatsEvent> data = new ArrayList<>();
+        ErrorStats errorStats = spy(new ErrorStats(mSpyContext, mLooper, true));
+        errorStats.pull(data);
+        errorStats.flush();
+
+        verify(mSpyContext, never()).getFileStreamPath(anyString());
+        verify(errorStats, times(1)).onPull(any());
+        verify(mSpyContext, never()).openFileOutput(anyString(), anyInt());
+    }
+
+    @Test
+    public void testPullEventStatsLessThanMinPullIntervalShouldSkip() throws Exception {
+        createTestFileForEventStats(System.currentTimeMillis() - MIN_PULL_INTERVAL_MILLIS / 2);
+        EventStats eventStats = spy(new EventStats(mSpyContext, mLooper, false));
+        final List<StatsEvent> data = new ArrayList<>();
+
+        int result = eventStats.pull(data);
+
+        assertEquals(StatsManager.PULL_SKIP, result);
+        verify(eventStats, never()).onPull(any());
+        assertEquals(data.size(), 0);
+    }
+
+    @Test
+    public void testPullEventStatsGreaterThanMinPullIntervalShouldNotSkip() throws Exception {
+        createTestFileForEventStats(System.currentTimeMillis() - MIN_PULL_INTERVAL_MILLIS - 1);
+        EventStats eventStats = spy(new EventStats(mSpyContext, mLooper, false));
+        final List<StatsEvent> data = new ArrayList<>();
+        int sizePulled = eventStats.mPulledAtoms.telecomEventStats.length;
+
+        int result = eventStats.pull(data);
+
+        assertEquals(StatsManager.PULL_SUCCESS, result);
+        verify(eventStats).onPull(eq(data));
+        assertEquals(data.size(), sizePulled);
+        assertEquals(eventStats.mPulledAtoms.telecomEventStats.length, 0);
+    }
+
+    @Test
+    public void testEventStatsLogCount() throws Exception {
+        EventStats eventStats = spy(new EventStats(mSpyContext, mLooper, false));
+        EventStats.CriticalEvent event = new EventStats.CriticalEvent(
+                VALUE_EVENT_ID, VALUE_UID, VALUE_CAUSE_ID);
+
+        for (int i = 0; i < 10; i++) {
+            eventStats.log(event);
+            waitForHandlerAction(eventStats, TEST_TIMEOUT);
+
+            verify(eventStats, times(i + 1)).onAggregate();
+            verify(eventStats, times(i + 1)).save(eq(DELAY_FOR_PERSISTENT_MILLIS));
+            assertEquals(eventStats.mPulledAtoms.telecomEventStats.length, 1);
+            verifyMessageForEventStats(eventStats.mPulledAtoms.telecomEventStats[0],
+                    VALUE_EVENT_ID, VALUE_UID, VALUE_CAUSE_ID, i + 1);
+        }
+    }
+
+    @Test
+    public void testEventStatsLogEvent() throws Exception {
+        EventStats eventStats = spy(new EventStats(mSpyContext, mLooper, false));
+        int[] events = {
+                EventStats.ID_UNKNOWN,
+                EventStats.ID_INIT,
+                EventStats.ID_DEFAULT_DIALER_CHANGED,
+                EventStats.ID_ADD_CALL,
+        };
+        int[] causes = {
+                EventStats.CAUSE_UNKNOWN,
+                EventStats.CAUSE_GENERIC_SUCCESS,
+                EventStats.CAUSE_GENERIC_FAILURE,
+                EventStats.CAUSE_CALL_TRANSACTION_SUCCESS,
+                EventStats.CAUSE_CALL_TRANSACTION_ERROR_UNKNOWN,
+                EventStats.CAUSE_CALL_TRANSACTION_CALL_CANNOT_BE_SET_TO_ACTIVE,
+                EventStats.CAUSE_CALL_TRANSACTION_CALL_IS_NOT_BEING_TRACKED,
+                EventStats.CAUSE_CALL_TRANSACTION_CANNOT_HOLD_CURRENT_ACTIVE_CALL,
+                EventStats.CAUSE_CALL_TRANSACTION_CALL_NOT_PERMITTED_AT_PRESENT_TIME,
+                EventStats.CAUSE_CALL_TRANSACTION_OPERATION_TIMED_OUT,
+        };
+        Random rand = new Random();
+        Map<EventStats.CriticalEvent, Integer> eventMap = new HashMap<>();
+
+        for (int i = 0; i < 10; i++) {
+            int e = events[rand.nextInt(events.length)];
+            int uid = rand.nextInt(65535);
+            int cause = causes[rand.nextInt(causes.length)];
+            EventStats.CriticalEvent ce = new EventStats.CriticalEvent(e, uid, cause);
+            eventMap.put(ce, eventMap.getOrDefault(ce, 0) + 1);
+
+            eventStats.log(ce);
+            waitForHandlerAction(eventStats, TEST_TIMEOUT);
+
+            verify(eventStats, times(i + 1)).onAggregate();
+            verify(eventStats, times(i + 1)).save(eq(DELAY_FOR_PERSISTENT_MILLIS));
+            assertEquals(eventStats.mPulledAtoms.telecomEventStats.length, eventMap.size());
+            assertTrue(hasMessageForEventStats(eventStats.mPulledAtoms.telecomEventStats,
+                    e, uid, cause, eventMap.get(ce)));
         }
     }
 
@@ -989,8 +1142,8 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
         assertEquals(atom.telecomErrorStats.length, VALUE_ATOM_COUNT);
         for (int i = 0; i < VALUE_ATOM_COUNT; i++) {
             assertNotNull(atom.telecomErrorStats[i]);
-            verifyMessageForErrorStats(atom.telecomErrorStats[i], VALUE_MODULE_ID, VALUE_ERROR_ID
-                    , VALUE_ERROR_COUNT);
+            verifyMessageForErrorStats(atom.telecomErrorStats[i], VALUE_MODULE_ID,
+                    VALUE_ERROR_ID, VALUE_ERROR_COUNT);
         }
     }
 
@@ -1006,6 +1159,55 @@ public class TelecomPulledAtomTest extends TelecomTestCase {
         for (PulledAtomsClass.TelecomErrorStats msg : msgs) {
             if (msg.getSubmodule() == moduleId && msg.getError() == errorId
                     && msg.getCount() == count) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void createTestFileForEventStats(long timestamps) throws IOException {
+        PulledAtomsClass.PulledAtoms atom = new PulledAtomsClass.PulledAtoms();
+        atom.telecomEventStats =
+                new PulledAtomsClass.TelecomEventStats[VALUE_ATOM_COUNT];
+        for (int i = 0; i < VALUE_ATOM_COUNT; i++) {
+            atom.telecomEventStats[i] = new PulledAtomsClass.TelecomEventStats();
+            atom.telecomEventStats[i].setEvent(VALUE_EVENT_ID + i);
+            atom.telecomEventStats[i].setUid(VALUE_UID);
+            atom.telecomEventStats[i].setEventCause(VALUE_CAUSE_ID);
+            atom.telecomEventStats[i].setCount(VALUE_EVENT_COUNT);
+        }
+        atom.setTelecomEventStatsPullTimestampMillis(timestamps);
+        FileOutputStream stream = new FileOutputStream(mTempFile);
+        stream.write(PulledAtomsClass.PulledAtoms.toByteArray(atom));
+        stream.close();
+    }
+
+    private void verifyTestDataForEventStats(
+            final PulledAtomsClass.PulledAtoms atom, long timestamps) {
+        assertNotNull(atom);
+        assertEquals(atom.getTelecomEventStatsPullTimestampMillis(), timestamps);
+        assertNotNull(atom.telecomEventStats);
+        assertEquals(atom.telecomEventStats.length, VALUE_ATOM_COUNT);
+        for (int i = 0; i < VALUE_ATOM_COUNT; i++) {
+            assertNotNull(atom.telecomEventStats[i]);
+            verifyMessageForEventStats(atom.telecomEventStats[i], VALUE_EVENT_ID + i,
+                    VALUE_UID, VALUE_CAUSE_ID, VALUE_EVENT_COUNT);
+        }
+    }
+
+    private void verifyMessageForEventStats(final PulledAtomsClass.TelecomEventStats msg,
+                                            int eventId, int uid, int causeId, int count) {
+        assertEquals(msg.getEvent(), eventId);
+        assertEquals(msg.getUid(), uid);
+        assertEquals(msg.getEventCause(), causeId);
+        assertEquals(msg.getCount(), count);
+    }
+
+    private boolean hasMessageForEventStats(final PulledAtomsClass.TelecomEventStats[] msgs,
+                                            int eventId, int uid, int causeId, int count) {
+        for (PulledAtomsClass.TelecomEventStats msg : msgs) {
+            if (msg.getEvent() == eventId && msg.getUid() == uid
+                    && msg.getEventCause() == causeId && msg.getCount() == count) {
                 return true;
             }
         }

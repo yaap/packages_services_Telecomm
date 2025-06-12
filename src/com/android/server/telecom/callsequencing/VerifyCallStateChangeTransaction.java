@@ -18,8 +18,10 @@ package com.android.server.telecom.callsequencing;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.server.telecom.Call;
+import com.android.server.telecom.CallState;
 import com.android.server.telecom.TelecomSystem;
 
+import android.telecom.CallException;
 import android.telecom.Log;
 
 import java.util.Set;
@@ -36,7 +38,7 @@ import java.util.stream.IntStream;
  */
 public class VerifyCallStateChangeTransaction extends CallTransaction {
     private static final String TAG = VerifyCallStateChangeTransaction.class.getSimpleName();
-    private static final long CALL_STATE_TIMEOUT_MILLISECONDS = 2000L;
+    private static final long CALL_STATE_TIMEOUT_MILLISECONDS = 5000L;
     private final Call mCall;
     private final Set<Integer> mTargetCallStates;
     private final CompletableFuture<CallTransactionResult> mTransactionResult =
@@ -53,6 +55,26 @@ public class VerifyCallStateChangeTransaction extends CallTransaction {
             }
             // NOTE:: keep listening to the call state until the timeout is reached. It's possible
             // another call state is reached in between...
+        }
+    };
+
+    private final Call.ListenerBase mCallListenerImpl = new Call.ListenerBase() {
+        @Override
+        public void onCallHoldFailed(Call call) {
+            if (call.equals(mCall) && mTargetCallStates.contains(CallState.ON_HOLD)) {
+                // Fail the transaction if a call hold failure is received.
+                mTransactionResult.complete(new CallTransactionResult(
+                        CallException.CODE_CANNOT_HOLD_CURRENT_ACTIVE_CALL, "error holding call"));
+            }
+        }
+        @Override
+        public void onCallResumeFailed(Call call) {
+            if (call.equals(mCall) && mTargetCallStates.contains(CallState.ACTIVE)) {
+                // Fail the transaction if a call resume failure is received (this means that the
+                // current call could not be unheld).
+                mTransactionResult.complete(new CallTransactionResult(
+                        CallException.CODE_CALL_CANNOT_BE_SET_TO_ACTIVE, "error unholding call"));
+            }
         }
     };
 
@@ -73,12 +95,14 @@ public class VerifyCallStateChangeTransaction extends CallTransaction {
             return mTransactionResult;
         }
         mCall.addCallStateListener(mCallStateListenerImpl);
+        mCall.addListener(mCallListenerImpl);
         return mTransactionResult;
     }
 
     @Override
     public void finishTransaction() {
         mCall.removeCallStateListener(mCallStateListenerImpl);
+        mCall.removeListener(mCallListenerImpl);
     }
 
     private boolean isNewCallStateTargetCallState() {

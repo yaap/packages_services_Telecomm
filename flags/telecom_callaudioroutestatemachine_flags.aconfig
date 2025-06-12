@@ -89,6 +89,17 @@ flag {
   bug: "315865533"
 }
 
+# OWNER=tgunn TARGET=24Q3
+flag {
+  name: "dont_use_communication_device_tracker"
+  namespace: "telecom"
+  description: "Do not use the communication device tracker with useRefactoredAudioRouteSwitching."
+  bug: "346472575"
+  metadata {
+    purpose: PURPOSE_BUGFIX
+  }
+}
+
 # OWNER=pmadapurmath TARGET=24Q3
 flag {
   name: "resolve_switching_bt_devices_computation"
@@ -125,6 +136,72 @@ flag {
   namespace: "telecom"
   description: "Ensure that audio is routed out of speaker in a video call when we receive USER_SWITCH_BASELINE_ROUTE."
   bug: "374037591"
+  metadata {
+    purpose: PURPOSE_BUGFIX
+  }
+}
+
+# OWNER=tgunn TARGET=25Q2
+flag {
+  name: "only_clear_communication_device_on_inactive"
+  namespace: "telecom"
+  description: "Only clear the communication device when transitioning to an inactive route."
+  bug: "376781369"
+  metadata {
+    purpose: PURPOSE_BUGFIX
+  }
+}
+
+# OWNER=tgunn TARGET=25Q2
+flag {
+  name: "check_device_type_on_route_change"
+  namespace: "telecom"
+  description: "When comparing devices on route change, also consider device type."
+  bug: "388509460"
+  metadata {
+    purpose: PURPOSE_BUGFIX
+  }
+}
+
+# OWNER=tgunn TARGET=25Q2
+flag {
+  name: "bus_device_is_a_speaker"
+  namespace: "telecom"
+  description: "Treat TYPE_BUS devices like TYPE_SPEAKER"
+  bug: "395647782"
+  metadata {
+    purpose: PURPOSE_BUGFIX
+  }
+}
+
+# OWNER=pmadapurmath TARGET=25Q3
+flag {
+  name: "update_preferred_audio_device_logic"
+  namespace: "telecom"
+  description: "Change the use of preferred device for strategy to only use it at the start of the call and include relevant syncing with AudioManager#getCommunicationDevice"
+  bug: "377345692"
+  metadata {
+    purpose: PURPOSE_BUGFIX
+  }
+}
+
+# OWNER=pmadapurmath TARGET=25Q3
+flag {
+  name: "call_audio_routing_performance_improvemenent"
+  namespace: "telecom"
+  description: "Change the handler to use the main looper to improve performance with processing messages from the message queue"
+  bug: "383466267"
+  metadata {
+    purpose: PURPOSE_BUGFIX
+  }
+}
+
+# OWNER=pmadapurmath TARGET=25Q3
+flag {
+  name: "maybe_default_speaker_after_unhold"
+  namespace: "telecom"
+  description: "If the call audio route was on speaker and the call is held/unheld, ensure that we route back to speaker."
+  bug: "406898224"
   metadata {
     purpose: PURPOSE_BUGFIX
   }

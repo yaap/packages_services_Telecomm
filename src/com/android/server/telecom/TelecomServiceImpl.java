@@ -27,8 +27,6 @@ import static android.Manifest.permission.READ_PRIVILEGED_PHONE_STATE;
 import static android.Manifest.permission.READ_SMS;
 import static android.Manifest.permission.REGISTER_SIM_SUBSCRIPTION;
 import static android.Manifest.permission.WRITE_SECURE_SETTINGS;
-import static android.telecom.CallAttributes.DIRECTION_INCOMING;
-import static android.telecom.CallAttributes.DIRECTION_OUTGOING;
 import static android.telecom.CallException.CODE_ERROR_UNKNOWN;
 import static android.telecom.TelecomManager.TELECOM_TRANSACTION_SUCCESS;
 
@@ -52,8 +50,6 @@ import android.net.Uri;
 import android.os.Binder;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.Handler;
-import android.os.Looper;
 import android.os.OutcomeReceiver;
 import android.os.ParcelFileDescriptor;
 import android.os.Process;
@@ -84,13 +80,14 @@ import com.android.internal.telecom.ICallControl;
 import com.android.internal.telecom.ICallEventCallback;
 import com.android.internal.telecom.ITelecomService;
 import com.android.internal.util.IndentingPrintWriter;
+import com.android.server.telecom.callsequencing.voip.VoipCallMonitor;
 import com.android.server.telecom.components.UserCallIntentProcessorFactory;
 import com.android.server.telecom.flags.FeatureFlags;
 import com.android.server.telecom.metrics.ApiStats;
+import com.android.server.telecom.metrics.EventStats;
+import com.android.server.telecom.metrics.EventStats.CriticalEvent;
 import com.android.server.telecom.metrics.TelecomMetricsController;
 import com.android.server.telecom.settings.BlockedNumbersActivity;
-import com.android.server.telecom.callsequencing.voip.IncomingCallTransaction;
-import com.android.server.telecom.callsequencing.voip.OutgoingCallTransaction;
 import com.android.server.telecom.callsequencing.TransactionManager;
 import com.android.server.telecom.callsequencing.CallTransaction;
 import com.android.server.telecom.callsequencing.CallTransactionResult;
@@ -105,6 +102,7 @@ import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 
 // TODO: Needed for move to system service: import com.android.internal.R;
 
@@ -144,6 +142,13 @@ public class TelecomServiceImpl {
             UUID.fromString("4edf6c8d-1e43-4c94-b0fc-a40c8d80cfe8");
     public static final String PLACE_CALL_SECURITY_EXCEPTION_ERROR_MSG =
             "Security exception thrown while placing an outgoing call.";
+    public static final UUID CALL_IS_NULL_OR_ID_MISMATCH_UUID =
+            UUID.fromString("b11f3251-474c-4f90-96d6-a256aebc3c19");
+    public static final String CALL_IS_NULL_OR_ID_MISMATCH_MSG =
+            "call is null or id mismatch";
+    public static final UUID ADD_CALL_ON_ERROR_UUID =
+            UUID.fromString("f8e7d6c5-b4a3-9210-8765-432109abcdef");
+
     private static final String TAG = "TelecomServiceImpl";
     private static final String TIME_LINE_ARG = "timeline";
     private static final int DEFAULT_VIDEO_STATE = -1;
@@ -173,10 +178,29 @@ public class TelecomServiceImpl {
     private final ITelecomService.Stub mBinderImpl = new ITelecomService.Stub() {
 
         @Override
+        public boolean hasForegroundServiceDelegation(
+                PhoneAccountHandle handle,
+                String packageName) {
+            enforceCallingPackage(packageName, "hasForegroundServiceDelegation");
+            long token = Binder.clearCallingIdentity();
+            try {
+                VoipCallMonitor vcm = mCallsManager.getVoipCallMonitor();
+                if (vcm != null) {
+                    return vcm.hasForegroundServiceDelegation(handle);
+                }
+                return false;
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+        }
+
+        @Override
         public void addCall(CallAttributes callAttributes, ICallEventCallback callEventCallback,
                 String callId, String callingPackage) {
+            int uid = Binder.getCallingUid();
+            int pid = Binder.getCallingPid();
             ApiStats.ApiEvent event = new ApiStats.ApiEvent(ApiStats.API_ADDCALL,
-                    Binder.getCallingUid(), ApiStats.RESULT_PERMISSION);
+                    uid, ApiStats.RESULT_PERMISSION);
             try {
                 Log.startSession("TSI.aC", Log.getPackageAbbreviation(callingPackage));
                 Log.i(TAG, "addCall: id=[%s], attributes=[%s]", callId, callAttributes);
@@ -193,68 +217,88 @@ public class TelecomServiceImpl {
 
                 // add extras about info used for FGS delegation
                 Bundle extras = new Bundle();
-                extras.putInt(CallAttributes.CALLER_UID_KEY, Binder.getCallingUid());
-                extras.putInt(CallAttributes.CALLER_PID_KEY, Binder.getCallingPid());
+                extras.putInt(CallAttributes.CALLER_UID_KEY, uid);
+                extras.putInt(CallAttributes.CALLER_PID_KEY, pid);
 
-                CallTransaction transaction = null;
-                // create transaction based on the call direction
-                switch (callAttributes.getDirection()) {
-                    case DIRECTION_OUTGOING:
-                        transaction = new OutgoingCallTransaction(callId, mContext, callAttributes,
-                                mCallsManager, extras, mFeatureFlags);
-                        break;
-                    case DIRECTION_INCOMING:
-                        transaction = new IncomingCallTransaction(callId, callAttributes,
-                                mCallsManager, extras, mFeatureFlags);
-                        break;
-                    default:
-                        throw new IllegalArgumentException(String.format("Invalid Call Direction. "
-                                        + "Was [%d] but should be within [%d,%d]",
-                                callAttributes.getDirection(), DIRECTION_INCOMING,
-                                DIRECTION_OUTGOING));
+
+                CompletableFuture<CallTransaction> transactionFuture;
+                long token = Binder.clearCallingIdentity();
+                try {
+                    transactionFuture = mCallsManager.createTransactionalCall(callId,
+                            callAttributes, extras, callingPackage);
+                } finally {
+                    Binder.restoreCallingIdentity(token);
                 }
 
-                mTransactionManager.addTransaction(transaction, new OutcomeReceiver<>() {
-                    @Override
-                    public void onResult(CallTransactionResult result) {
-                        Log.d(TAG, "addCall: onResult");
-                        Call call = result.getCall();
+                transactionFuture.thenCompose((transaction) -> {
+                    if (transaction != null) {
+                        mTransactionManager.addTransaction(transaction, new OutcomeReceiver<>() {
+                            @Override
+                            public void onResult(CallTransactionResult result) {
+                                Log.d(TAG, "addCall: onResult");
+                                Call call = result.getCall();
+                                if (mFeatureFlags.telecomMetricsSupport()) {
+                                    mMetricsController.getEventStats().log(new CriticalEvent(
+                                            EventStats.ID_ADD_CALL, uid,
+                                            EventStats.CAUSE_CALL_TRANSACTION_SUCCESS));
+                                }
 
-                        if (call == null || !call.getId().equals(callId)) {
-                            Log.i(TAG, "addCall: onResult: call is null or id mismatch");
-                            onAddCallControl(callId, callEventCallback, null,
-                                    new CallException(ADD_CALL_ERR_MSG, CODE_ERROR_UNKNOWN));
-                            return;
-                        }
+                                if (call == null || !call.getId().equals(callId)) {
+                                    Log.i(TAG, "addCall: onResult: call is null or id mismatch");
+                                    onAddCallControl(callId, callEventCallback, null,
+                                            new CallException(ADD_CALL_ERR_MSG,
+                                                    CODE_ERROR_UNKNOWN));
+                                    if (mFeatureFlags.enableCallExceptionAnomReports()) {
+                                        mAnomalyReporter.reportAnomaly(
+                                                CALL_IS_NULL_OR_ID_MISMATCH_UUID,
+                                                CALL_IS_NULL_OR_ID_MISMATCH_MSG);
+                                    }
+                                    return;
+                                }
 
-                        TransactionalServiceWrapper serviceWrapper =
-                                mTransactionalServiceRepository
-                                        .addNewCallForTransactionalServiceWrapper(handle,
-                                                callEventCallback, mCallsManager, call);
+                                TransactionalServiceWrapper serviceWrapper =
+                                        mTransactionalServiceRepository
+                                                .addNewCallForTransactionalServiceWrapper(handle,
+                                                        callEventCallback, mCallsManager, call);
 
-                        call.setTransactionServiceWrapper(serviceWrapper);
+                                call.setTransactionServiceWrapper(serviceWrapper);
 
-                        if (mFeatureFlags.transactionalVideoState()) {
-                            call.setTransactionalCallSupportsVideoCalling(callAttributes);
-                        }
-                        ICallControl clientCallControl = serviceWrapper.getICallControl();
+                                if (mFeatureFlags.transactionalVideoState()) {
+                                    call.setTransactionalCallSupportsVideoCalling(callAttributes);
+                                }
+                                ICallControl clientCallControl = serviceWrapper.getICallControl();
 
-                        if (clientCallControl == null) {
-                            throw new IllegalStateException("TransactionalServiceWrapper"
-                                    + "#ICallControl is null.");
-                        }
+                                if (clientCallControl == null) {
+                                    throw new IllegalStateException("TransactionalServiceWrapper"
+                                            + "#ICallControl is null.");
+                                }
 
-                        // finally, send objects back to the client
-                        onAddCallControl(callId, callEventCallback, clientCallControl, null);
+                                // finally, send objects back to the client
+                                onAddCallControl(callId, callEventCallback, clientCallControl,
+                                        null);
+                            }
+
+                            @Override
+                            public void onError(@NonNull CallException exception) {
+                                Log.d(TAG, "addCall: onError: e=[%s]", exception.toString());
+                                onAddCallControl(callId, callEventCallback, null, exception);
+                                if (mFeatureFlags.enableCallExceptionAnomReports()) {
+                                    mAnomalyReporter.reportAnomaly(
+                                            ADD_CALL_ON_ERROR_UUID,
+                                            exception.getMessage());
+                                }
+                                if (mFeatureFlags.telecomMetricsSupport()) {
+                                    mMetricsController.getEventStats().log(new CriticalEvent(
+                                            EventStats.ID_ADD_CALL, uid,
+                                            EventStats.CAUSE_CALL_TRANSACTION_BASE
+                                                    + exception.getCode()));
+                                }
+                            }
+                        });
                     }
-
-                    @Override
-                    public void onError(@NonNull CallException exception) {
-                        Log.d(TAG, "addCall: onError: e=[%s]", exception.toString());
-                        onAddCallControl(callId, callEventCallback, null, exception);
-                    }
+                    event.setResult(ApiStats.RESULT_NORMAL);
+                    return CompletableFuture.completedFuture(transaction);
                 });
-                event.setResult(ApiStats.RESULT_NORMAL);
             } finally {
                 logEvent(event);
                 Log.endSession();
@@ -1477,26 +1521,36 @@ public class TelecomServiceImpl {
         private boolean isPrivilegedUid() {
             int callingUid = Binder.getCallingUid();
             return mFeatureFlags.allowSystemAppsResolveVoipCalls()
-                    ? (UserHandle.isSameApp(callingUid, Process.ROOT_UID)
-                            || UserHandle.isSameApp(callingUid, Process.SYSTEM_UID)
-                            || UserHandle.isSameApp(callingUid, Process.SHELL_UID))
+                    ? (isSameApp(callingUid, Process.ROOT_UID)
+                            || isSameApp(callingUid, Process.SYSTEM_UID)
+                            || isSameApp(callingUid, Process.SHELL_UID))
                     : (callingUid == Process.ROOT_UID
                             || callingUid == Process.SYSTEM_UID
                             || callingUid == Process.SHELL_UID);
+        }
+
+        private boolean isSameApp(int uid1, int uid2) {
+            return UserHandle.getAppId(uid1) == UserHandle.getAppId(uid2);
         }
 
         private boolean isSysUiUid() {
             int callingUid = Binder.getCallingUid();
             int systemUiUid;
             if (mPackageManager != null && mSystemUiPackageName != null) {
+                long whosCalling = Binder.clearCallingIdentity();
                 try {
-                    systemUiUid = mPackageManager.getPackageUid(mSystemUiPackageName, 0);
-                    Log.i(TAG, "isSysUiUid: callingUid = " + callingUid + "; systemUiUid = "
-                            + systemUiUid);
-                    return UserHandle.isSameApp(callingUid, systemUiUid);
-                } catch (PackageManager.NameNotFoundException e) {
-                    Log.w(TAG, "isSysUiUid: caught PackageManager NameNotFoundException = " + e);
-                    return false;
+                    try {
+                        systemUiUid = mPackageManager.getPackageUid(mSystemUiPackageName, 0);
+                        Log.i(TAG, "isSysUiUid: callingUid = " + callingUid + "; systemUiUid = "
+                                + systemUiUid);
+                        return isSameApp(callingUid, systemUiUid);
+                    } catch (PackageManager.NameNotFoundException e) {
+                        Log.w(TAG,
+                                "isSysUiUid: caught PackageManager NameNotFoundException = " + e);
+                        return false;
+                    }
+                } finally {
+                    Binder.restoreCallingIdentity(whosCalling);
                 }
             } else {
                 Log.w(TAG, "isSysUiUid: caught null check and returned false; "
@@ -2912,6 +2966,17 @@ public class TelecomServiceImpl {
             }
         }
 
+        @Override
+        public void setMetricsTestMode(boolean enabled) {
+            if (mFeatureFlags.telecomMetricsSupport()) {
+                mMetricsController.setTestMode(enabled);
+            }
+        }
+
+        @Override
+        public void waitForAudioToUpdate(boolean expectActive) {
+            mCallsManager.waitForAudioToUpdate(expectActive);
+        }
         /**
          * Determines whether there are any ongoing {@link PhoneAccount#CAPABILITY_SELF_MANAGED}
          * calls for a given {@code packageName} and {@code userHandle}.
@@ -3001,7 +3066,10 @@ public class TelecomServiceImpl {
         });
 
         mTransactionManager = TransactionManager.getInstance();
-        mTransactionalServiceRepository = new TransactionalServiceRepository(mFeatureFlags);
+        mTransactionManager.setFeatureFlag(mFeatureFlags);
+        mTransactionManager.setAnomalyReporter(mAnomalyReporter);
+        mTransactionalServiceRepository = new TransactionalServiceRepository(mFeatureFlags,
+                mAnomalyReporter);
         mBlockedNumbersManager = mFeatureFlags.telecomMainlineBlockedNumbersManager()
                 ? mContext.getSystemService(BlockedNumbersManager.class)
                 : null;
@@ -3255,19 +3323,22 @@ public class TelecomServiceImpl {
         try {
             pm = mContext.createContextAsUser(
                     UserHandle.getUserHandleForUid(callingUid), 0).getPackageManager();
+
+            // This has to happen inside the scope of the `clearCallingIdentity` block
+            // otherwise the caller may fail to call `TelecomManager#endCall`.
+            if (pm != null) {
+                try {
+                    packageUid = pm.getPackageUid(packageName, 0);
+                } catch (PackageManager.NameNotFoundException e) {
+                    // packageUid is -1.
+                }
+            }
         } catch (Exception e) {
             Log.i(this, "callingUidMatchesPackageManagerRecords:"
                     + " createContextAsUser hit exception=[%s]", e.toString());
             return false;
         } finally {
             Binder.restoreCallingIdentity(token);
-        }
-        if (pm != null) {
-            try {
-                packageUid = pm.getPackageUid(packageName, 0);
-            } catch (PackageManager.NameNotFoundException e) {
-                // packageUid is -1.
-            }
         }
 
         if (packageUid != callingUid) {

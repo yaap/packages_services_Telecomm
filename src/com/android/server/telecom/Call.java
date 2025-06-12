@@ -80,6 +80,7 @@ import com.android.server.telecom.flags.FeatureFlags;
 import com.android.server.telecom.stats.CallFailureCause;
 import com.android.server.telecom.stats.CallStateChangedAtomWriter;
 import com.android.server.telecom.ui.ToastFactory;
+import com.android.server.telecom.callsequencing.CallTransaction;
 import com.android.server.telecom.callsequencing.TransactionManager;
 import com.android.server.telecom.callsequencing.VerifyCallStateChangeTransaction;
 import com.android.server.telecom.callsequencing.CallTransactionResult;
@@ -130,6 +131,20 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
 
     private static final char NO_DTMF_TONE = '\0';
 
+    /**
+     * The following simultaneous call types will be set on each call on creation and may be updated
+     * according to priority level. CALL_DIRECTION_DUAL_DIFF_ACCOUNT holds the highest priority.
+     * So if for example, a call is created with CALL_DIRECTION_DUAL_SAME_ACCOUNT, it can be
+     * upgraded to CALL_DIRECTION_DUAL_DIFF_ACCOUNT if another call is added with a different phone
+     * account.
+     */
+    public static final int CALL_SIMULTANEOUS_UNKNOWN = 0;
+    // Only used if simultaneous calling is not available
+    public static final int CALL_SIMULTANEOUS_DISABLED_SAME_ACCOUNT = 1;
+    // Only used if simultaneous calling is not available
+    public static final int CALL_SIMULTANEOUS_DISABLED_DIFF_ACCOUNT = 2;
+    public static final int CALL_DIRECTION_DUAL_SAME_ACCOUNT = 3;
+    public static final int CALL_DIRECTION_DUAL_DIFF_ACCOUNT = 4;
 
     /**
      * Listener for CallState changes which can be leveraged by a Transaction.
@@ -190,6 +205,7 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
         default void onHoldToneRequested(Call call) {};
         default void onCallHoldFailed(Call call) {};
         default void onCallSwitchFailed(Call call) {};
+        default void onCallResumeFailed(Call call) {};
         default void onConnectionEvent(Call call, String event, Bundle extras) {};
         default void onCallStreamingStateChanged(Call call, boolean isStreaming) {}
         default void onExternalCallChanged(Call call, boolean isExternalCall) {};
@@ -279,6 +295,8 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
         public void onCallHoldFailed(Call call) {}
         @Override
         public void onCallSwitchFailed(Call call) {}
+        @Override
+        public void onCallResumeFailed(Call call) {}
         @Override
         public void onConnectionEvent(Call call, String event, Bundle extras) {}
         @Override
@@ -500,6 +518,16 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
      */
     private DisconnectCause mOverrideDisconnectCause = new DisconnectCause(DisconnectCause.UNKNOWN);
 
+    /**
+     * Simultaneous type of the call.
+     */
+    private int mSimultaneousType = CALL_SIMULTANEOUS_UNKNOWN;
+
+    /**
+     * Indicate whether the call has the video
+     */
+    boolean mHasVideoCall;
+
     private Bundle mIntentExtras = new Bundle();
 
     /**
@@ -619,6 +647,7 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
 
     private boolean mIsTransactionalCall = false;
     private CallingPackageIdentity mCallingPackageIdentity = new CallingPackageIdentity();
+    private boolean mSkipAutoUnhold = false;
 
     /**
      * CallingPackageIdentity is responsible for storing properties about the calling package that
@@ -1882,7 +1911,6 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
         return mTargetPhoneAccountHandle;
     }
 
-    @VisibleForTesting
     public PhoneAccountHandle getTargetPhoneAccount() {
         return mTargetPhoneAccountHandle;
     }
@@ -2642,7 +2670,7 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
             return;
         }
         mCreateConnectionProcessor = new CreateConnectionProcessor(this, mRepository, this,
-                phoneAccountRegistrar, mContext, mFlags, new Timeouts.Adapter());
+                phoneAccountRegistrar, mCallsManager, mContext, mFlags, new Timeouts.Adapter());
         mCreateConnectionProcessor.process();
     }
 
@@ -2832,20 +2860,20 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
     }
 
     @VisibleForTesting
-    public void disconnect() {
-        disconnect(0);
+    public CompletableFuture<Boolean> disconnect() {
+        return disconnect(0);
     }
 
-    public void disconnect(String reason) {
-        disconnect(0, reason);
+    public CompletableFuture<Boolean> disconnect(String reason) {
+        return disconnect(0, reason);
     }
 
     /**
      * Attempts to disconnect the call through the connection service.
      */
     @VisibleForTesting
-    public void disconnect(long disconnectionTimeout) {
-        disconnect(disconnectionTimeout, "internal" /** reason */);
+    public CompletableFuture<Boolean> disconnect(long disconnectionTimeout) {
+        return disconnect(disconnectionTimeout, "internal" /* reason */);
     }
 
     /**
@@ -2855,16 +2883,24 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
      *               as TelecomManager.
      */
     @VisibleForTesting
-    public void disconnect(long disconnectionTimeout, String reason) {
+    public CompletableFuture<Boolean> disconnect(long disconnectionTimeout,
+            String reason) {
         Log.addEvent(this, LogUtils.Events.REQUEST_DISCONNECT, reason);
 
         // Track that the call is now locally disconnecting.
         setLocallyDisconnecting(true);
         maybeSetCallAsDisconnectingChild();
 
+        CompletableFuture<Boolean> disconnectFutureHandler =
+                CompletableFuture.completedFuture(false);
         if (mState == CallState.NEW || mState == CallState.SELECT_PHONE_ACCOUNT ||
                 mState == CallState.CONNECTING) {
             Log.i(this, "disconnect: Aborting call %s", getId());
+            if (mFlags.enableCallSequencing()) {
+                disconnectFutureHandler = awaitCallStateChangeAndMaybeDisconnectCall(
+                        false /* shouldDisconnectUponTimeout */, "disconnect",
+                        CallState.DISCONNECTED, CallState.ABORTED);
+            }
             abort(disconnectionTimeout);
         } else if (mState != CallState.ABORTED && mState != CallState.DISCONNECTED) {
             if (mState == CallState.AUDIO_PROCESSING && !hasGoneActiveBefore()) {
@@ -2876,7 +2912,8 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
                 setOverrideDisconnectCauseCode(new DisconnectCause(DisconnectCause.MISSED));
             }
             if (mTransactionalService != null) {
-                mTransactionalService.onDisconnect(this, getDisconnectCause());
+                disconnectFutureHandler = mTransactionalService.onDisconnect(this,
+                        getDisconnectCause());
                 Log.i(this, "Send Disconnect to transactional service for call");
             } else if (mConnectionService == null) {
                 Log.e(this, new Exception(), "disconnect() request on a call without a"
@@ -2887,9 +2924,15 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
                 // confirms that the call was actually disconnected. Only then is the
                 // association between call and connection service severed, see
                 // {@link CallsManager#markCallAsDisconnected}.
+                if (mFlags.enableCallSequencing()) {
+                    disconnectFutureHandler = awaitCallStateChangeAndMaybeDisconnectCall(
+                            false /* shouldDisconnectUponTimeout */, "disconnect",
+                            CallState.DISCONNECTED);
+                }
                 mConnectionService.disconnect(this);
             }
         }
+        return disconnectFutureHandler;
     }
 
     void abort(long disconnectionTimeout) {
@@ -2932,29 +2975,35 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
      * @param videoState The video state in which to answer the call.
      */
     @VisibleForTesting
-    public void answer(int videoState) {
+    public CompletableFuture<Boolean> answer(int videoState) {
+        CompletableFuture<Boolean> answerCallFuture = CompletableFuture.completedFuture(false);
         // Check to verify that the call is still in the ringing state. A call can change states
         // between the time the user hits 'answer' and Telecom receives the command.
         if (isRinging("answer")) {
+            Log.addEvent(this, LogUtils.Events.REQUEST_ACCEPT);
             if (!isVideoCallingSupportedByPhoneAccount() && VideoProfile.isVideo(videoState)) {
                 // Video calling is not supported, yet the InCallService is attempting to answer as
                 // video.  We will simply answer as audio-only.
                 videoState = VideoProfile.STATE_AUDIO_ONLY;
             }
             // At this point, we are asking the connection service to answer but we don't assume
-            // that it will work. Instead, we wait until confirmation from the connectino service
+            // that it will work. Instead, we wait until confirmation from the connection service
             // that the call is in a non-STATE_RINGING state before changing the UI. See
             // {@link ConnectionServiceAdapter#setActive} and other set* methods.
             if (mConnectionService != null) {
+                if (mFlags.enableCallSequencing()) {
+                    answerCallFuture = awaitCallStateChangeAndMaybeDisconnectCall(
+                            false /* shouldDisconnectUponTimeout */, "answer", CallState.ACTIVE);
+                }
                 mConnectionService.answer(this, videoState);
             } else if (mTransactionalService != null) {
-                mTransactionalService.onAnswer(this, videoState);
+                return mTransactionalService.onAnswer(this, videoState);
             } else {
                 Log.e(this, new NullPointerException(),
                         "answer call failed due to null CS callId=%s", getId());
             }
-            Log.addEvent(this, LogUtils.Events.REQUEST_ACCEPT);
         }
+        return answerCallFuture;
     }
 
     /**
@@ -3034,74 +3083,101 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
      *               if the reject is initiated from an API such as TelecomManager.
      */
     @VisibleForTesting
-    public void reject(boolean rejectWithMessage, String textMessage, String reason) {
+    public CompletableFuture<Boolean> reject(boolean rejectWithMessage,
+            String textMessage, String reason) {
+        CompletableFuture<Boolean> rejectFutureHandler = CompletableFuture.completedFuture(false);
         if (mState == CallState.SIMULATED_RINGING) {
+            Log.addEvent(this, LogUtils.Events.REQUEST_REJECT, reason);
             // This handles the case where the user manually rejects a call that's in simulated
             // ringing. Since the call is already active on the connectionservice side, we want to
             // hangup, not reject.
             setOverrideDisconnectCauseCode(new DisconnectCause(DisconnectCause.REJECTED));
             if (mTransactionalService != null) {
-                mTransactionalService.onDisconnect(this,
+                return mTransactionalService.onDisconnect(this,
                         new DisconnectCause(DisconnectCause.REJECTED));
             } else if (mConnectionService != null) {
+                if (mFlags.enableCallSequencing()) {
+                    rejectFutureHandler = awaitCallStateChangeAndMaybeDisconnectCall(
+                            false /* shouldDisconnectUponTimeout */, "reject",
+                            CallState.DISCONNECTED);
+                }
                 mConnectionService.disconnect(this);
+                return rejectFutureHandler;
             } else {
                 Log.e(this, new NullPointerException(),
                         "reject call failed due to null CS callId=%s", getId());
             }
-            Log.addEvent(this, LogUtils.Events.REQUEST_REJECT, reason);
         } else if (isRinging("reject") || isAnswered("reject")) {
+            Log.addEvent(this, LogUtils.Events.REQUEST_REJECT, reason);
             // Ensure video state history tracks video state at time of rejection.
             mVideoStateHistory |= mVideoState;
 
             if (mTransactionalService != null) {
-                mTransactionalService.onDisconnect(this,
+                return mTransactionalService.onDisconnect(this,
                         new DisconnectCause(DisconnectCause.REJECTED));
             } else if (mConnectionService != null) {
+                if (mFlags.enableCallSequencing()) {
+                    rejectFutureHandler = awaitCallStateChangeAndMaybeDisconnectCall(
+                            false /* shouldDisconnectUponTimeout */, "reject",
+                            CallState.DISCONNECTED);
+                }
                 mConnectionService.reject(this, rejectWithMessage, textMessage);
+                return rejectFutureHandler;
             } else {
                 Log.e(this, new NullPointerException(),
                         "reject call failed due to null CS callId=%s", getId());
             }
-            Log.addEvent(this, LogUtils.Events.REQUEST_REJECT, reason);
         }
+        return rejectFutureHandler;
     }
 
     /**
      * Reject this Telecom call with the user-indicated reason.
      * @param rejectReason The user-indicated reason fore rejecting the call.
      */
-    public void reject(@android.telecom.Call.RejectReason int rejectReason) {
+    public CompletableFuture<Boolean> reject(@android.telecom.Call.RejectReason int rejectReason) {
+        CompletableFuture<Boolean> rejectFutureHandler = CompletableFuture.completedFuture(false);
         if (mState == CallState.SIMULATED_RINGING) {
+            Log.addEvent(this, LogUtils.Events.REQUEST_REJECT);
             // This handles the case where the user manually rejects a call that's in simulated
             // ringing. Since the call is already active on the connectionservice side, we want to
             // hangup, not reject.
             // Since its simulated reason we can't pass along the reject reason.
             setOverrideDisconnectCauseCode(new DisconnectCause(DisconnectCause.REJECTED));
             if (mTransactionalService != null) {
-                mTransactionalService.onDisconnect(this,
+                return mTransactionalService.onDisconnect(this,
                         new DisconnectCause(DisconnectCause.REJECTED));
             } else if (mConnectionService != null) {
+                if (mFlags.enableCallSequencing()) {
+                    rejectFutureHandler = awaitCallStateChangeAndMaybeDisconnectCall(
+                            false /* shouldDisconnectUponTimeout */, "reject",
+                            CallState.DISCONNECTED);
+                }
                 mConnectionService.disconnect(this);
             } else {
                 Log.e(this, new NullPointerException(),
                         "reject call failed due to null CS callId=%s", getId());
             }
-            Log.addEvent(this, LogUtils.Events.REQUEST_REJECT);
         } else if (isRinging("reject") || isAnswered("reject")) {
+            Log.addEvent(this, LogUtils.Events.REQUEST_REJECT, rejectReason);
             // Ensure video state history tracks video state at time of rejection.
             mVideoStateHistory |= mVideoState;
             if (mTransactionalService != null) {
-                mTransactionalService.onDisconnect(this,
+                return mTransactionalService.onDisconnect(this,
                         new DisconnectCause(DisconnectCause.REJECTED));
             } else if (mConnectionService != null) {
+                if (mFlags.enableCallSequencing()) {
+                    rejectFutureHandler = awaitCallStateChangeAndMaybeDisconnectCall(
+                            false /* shouldDisconnectUponTimeout */, "reject",
+                            CallState.DISCONNECTED);
+                }
                 mConnectionService.rejectWithReason(this, rejectReason);
             } else {
                 Log.e(this, new NullPointerException(),
                         "reject call failed due to null CS callId=%s", getId());
             }
-            Log.addEvent(this, LogUtils.Events.REQUEST_REJECT, rejectReason);
         }
+        return rejectFutureHandler;
     }
 
     /**
@@ -3151,41 +3227,57 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
      * Puts the call on hold if it is currently active.
      */
     @VisibleForTesting
-    public void hold() {
-        hold(null /* reason */);
+    public CompletableFuture<Boolean> hold() {
+        return hold(null /* reason */);
     }
 
     /**
      * This method requests the ConnectionService or TransactionalService hosting the call to put
      * the call on hold
      */
-    public void hold(String reason) {
+    public CompletableFuture<Boolean> hold(String reason) {
+        CompletableFuture<Boolean> holdFutureHandler = CompletableFuture.completedFuture(false);
         if (mState == CallState.ACTIVE) {
+            Log.addEvent(this, LogUtils.Events.REQUEST_HOLD, reason);
             if (mTransactionalService != null) {
-                mTransactionalService.onSetInactive(this);
+                return mTransactionalService.onSetInactive(this);
             } else if (mConnectionService != null) {
-                if (mFlags.transactionalCsVerifier()) {
-                    awaitCallStateChangeAndMaybeDisconnectCall(CallState.ON_HOLD, isSelfManaged(),
-                            "hold");
+                if (mFlags.transactionalCsVerifier() || mFlags.enableCallSequencing()) {
+                    holdFutureHandler = awaitCallStateChangeAndMaybeDisconnectCall(isSelfManaged(),
+                            "hold", CallState.ON_HOLD, CallState.DISCONNECTED).thenCompose(
+                                    (result) -> {
+                                        // Explicitly handle self-managed hold failures where we
+                                        // explicitly disconnect the call and treat it as a
+                                        // completed transaction.
+                                        if (!result && isSelfManaged()) {
+                                            Log.i(this, "hold: Completing transaction "
+                                                    + "after disconnecting held call.");
+                                            return CompletableFuture.completedFuture(true);
+                                        }
+                                        return CompletableFuture.completedFuture(result);
+                                    });;
                 }
                 mConnectionService.hold(this);
+                return holdFutureHandler;
             } else {
                 Log.e(this, new NullPointerException(),
                         "hold call failed due to null CS callId=%s", getId());
             }
-            Log.addEvent(this, LogUtils.Events.REQUEST_HOLD, reason);
         }
+        return holdFutureHandler;
     }
 
     /**
      * helper that can be used for any callback that requests a call state change and wants to
      * verify the change
      */
-    public void awaitCallStateChangeAndMaybeDisconnectCall(int targetCallState,
-            boolean shouldDisconnectUponTimeout, String callingMethod) {
+    public CompletableFuture<Boolean> awaitCallStateChangeAndMaybeDisconnectCall(
+            boolean shouldDisconnectUponTimeout, String callingMethod, int... targetCallStates) {
         TransactionManager tm = TransactionManager.getInstance();
-        tm.addTransaction(new VerifyCallStateChangeTransaction(mCallsManager.getLock(),
-                this, targetCallState), new OutcomeReceiver<>() {
+        CallTransaction callTransaction = new VerifyCallStateChangeTransaction(
+                mCallsManager.getLock(), this, targetCallStates);
+        return tm.addTransaction(callTransaction,
+                new OutcomeReceiver<>() {
             @Override
             public void onResult(CallTransactionResult result) {
                 Log.i(this, "awaitCallStateChangeAndMaybeDisconnectCall: %s: onResult:"
@@ -3210,22 +3302,29 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
      * Releases the call from hold if it is currently active.
      */
     @VisibleForTesting
-    public void unhold() {
-        unhold(null /* reason */);
+    public CompletableFuture<Boolean> unhold() {
+        return unhold(null /* reason */);
     }
 
-    public void unhold(String reason) {
+    public CompletableFuture<Boolean> unhold(String reason) {
+        CompletableFuture<Boolean> unholdFutureHandler = CompletableFuture.completedFuture(false);
         if (mState == CallState.ON_HOLD) {
+            Log.addEvent(this, LogUtils.Events.REQUEST_UNHOLD, reason);
             if (mTransactionalService != null){
-                mTransactionalService.onSetActive(this);
+                return mTransactionalService.onSetActive(this);
             } else if (mConnectionService != null){
+                if (mFlags.enableCallSequencing()) {
+                    unholdFutureHandler = awaitCallStateChangeAndMaybeDisconnectCall(
+                            false /* shouldDisconnectUponTimeout */, "unhold", CallState.ACTIVE);
+                }
                 mConnectionService.unhold(this);
+                return unholdFutureHandler;
             } else {
                 Log.e(this, new NullPointerException(),
                         "unhold call failed due to null CS callId=%s", getId());
             }
-            Log.addEvent(this, LogUtils.Events.REQUEST_UNHOLD, reason);
         }
+        return unholdFutureHandler;
     }
 
     /** Checks if this is a live call or not. */
@@ -3323,6 +3422,13 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
                 Log.addEvent(this, LogUtils.Events.VERSTAT_CHANGED, callerNumberVerificationStatus);
                 setCallerNumberVerificationStatus(callerNumberVerificationStatus);
             }
+        }
+
+        if (extras.containsKey(Connection.EXTRA_ANSWERING_DROPS_FG_CALL)) {
+            CharSequence appName =
+                    extras.getCharSequence(Connection.EXTRA_ANSWERING_DROPS_FG_CALL_APP_NAME);
+            Log.addEvent(this, LogUtils.Events.ANSWER_DROPS_FG,
+                    "Answering will drop FG call from %s", appName);
         }
 
         // The remote connection service API can track the phone account which was originally
@@ -4230,6 +4336,7 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
         }
 
         if (VideoProfile.isVideo(videoState)) {
+            mHasVideoCall = true;
             mAnalytics.setCallIsVideo(true);
         }
     }
@@ -4440,6 +4547,10 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
         } else if (Connection.EVENT_CALL_SWITCH_FAILED.equals(event)) {
             for (Listener l : mListeners) {
                 l.onCallSwitchFailed(this);
+            }
+        } else if (Connection.EVENT_CALL_RESUME_FAILED.equals(event)) {
+            for (Listener l : mListeners) {
+                l.onCallResumeFailed(this);
             }
         } else if (Connection.EVENT_DEVICE_TO_DEVICE_MESSAGE.equals(event)
                 && extras != null && extras.containsKey(
@@ -4992,5 +5103,34 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
                 listener.onCallStreamingStateChanged(this, false /** isStreaming */);
             }
         }
+    }
+
+    public void setSimultaneousType(int simultaneousType) {
+        mSimultaneousType = simultaneousType;
+    }
+
+    public int getSimultaneousType() {
+        return mSimultaneousType;
+    }
+
+    public boolean hasVideoCall() {
+        return mHasVideoCall;
+    }
+
+    /**
+     * Used only for call sequencing for cases when we may end up auto-unholding the held call while
+     * processing an outgoing (emergency) call. We want to refrain from unholding the held call so
+     * that we don't end up with two active calls. Once the outgoing call is disconnected (either
+     * from a successful disconnect by the user or a failed call), the auto-unhold logic will be
+     * triggered again and successfully unhold the held call at that point. Note, that this only
+     * applies to non-holdable phone accounts (i.e. Verizon). Refer to
+     * {@link CallsManagerCallSequencingAdapter#maybeMoveHeldCallToForeground} for details.
+     */
+    public void setSkipAutoUnhold(boolean result) {
+        mSkipAutoUnhold = result;
+    }
+
+    public boolean getSkipAutoUnhold() {
+        return mSkipAutoUnhold;
     }
 }

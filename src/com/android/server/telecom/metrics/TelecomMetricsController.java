@@ -20,10 +20,12 @@ import static com.android.server.telecom.TelecomStatsLog.CALL_AUDIO_ROUTE_STATS;
 import static com.android.server.telecom.TelecomStatsLog.CALL_STATS;
 import static com.android.server.telecom.TelecomStatsLog.TELECOM_API_STATS;
 import static com.android.server.telecom.TelecomStatsLog.TELECOM_ERROR_STATS;
+import static com.android.server.telecom.TelecomStatsLog.TELECOM_EVENT_STATS;
 
 import android.annotation.NonNull;
 import android.app.StatsManager;
 import android.content.Context;
+import android.os.Binder;
 import android.os.HandlerThread;
 import android.telecom.Log;
 import android.util.StatsEvent;
@@ -36,6 +38,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class TelecomMetricsController implements StatsManager.StatsPullAtomCallback {
 
@@ -44,6 +47,7 @@ public class TelecomMetricsController implements StatsManager.StatsPullAtomCallb
     private final Context mContext;
     private final HandlerThread mHandlerThread;
     private final ConcurrentHashMap<Integer, TelecomPulledAtom> mStats = new ConcurrentHashMap<>();
+    private final AtomicBoolean mIsTestMode = new AtomicBoolean(false);
 
     private TelecomMetricsController(@NonNull Context context,
                                      @NonNull HandlerThread handlerThread) {
@@ -73,8 +77,13 @@ public class TelecomMetricsController implements StatsManager.StatsPullAtomCallb
     public ApiStats getApiStats() {
         ApiStats stats = (ApiStats) mStats.get(TELECOM_API_STATS);
         if (stats == null) {
-            stats = new ApiStats(mContext, mHandlerThread.getLooper());
-            registerAtom(stats.getTag(), stats);
+            long token = Binder.clearCallingIdentity();
+            try {
+                stats = new ApiStats(mContext, mHandlerThread.getLooper(), isTestMode());
+                registerAtom(stats.getTag(), stats);
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
         }
         return stats;
     }
@@ -83,7 +92,7 @@ public class TelecomMetricsController implements StatsManager.StatsPullAtomCallb
     public AudioRouteStats getAudioRouteStats() {
         AudioRouteStats stats = (AudioRouteStats) mStats.get(CALL_AUDIO_ROUTE_STATS);
         if (stats == null) {
-            stats = new AudioRouteStats(mContext, mHandlerThread.getLooper());
+            stats = new AudioRouteStats(mContext, mHandlerThread.getLooper(), isTestMode());
             registerAtom(stats.getTag(), stats);
         }
         return stats;
@@ -93,7 +102,7 @@ public class TelecomMetricsController implements StatsManager.StatsPullAtomCallb
     public CallStats getCallStats() {
         CallStats stats = (CallStats) mStats.get(CALL_STATS);
         if (stats == null) {
-            stats = new CallStats(mContext, mHandlerThread.getLooper());
+            stats = new CallStats(mContext, mHandlerThread.getLooper(), isTestMode());
             registerAtom(stats.getTag(), stats);
         }
         return stats;
@@ -103,7 +112,17 @@ public class TelecomMetricsController implements StatsManager.StatsPullAtomCallb
     public ErrorStats getErrorStats() {
         ErrorStats stats = (ErrorStats) mStats.get(TELECOM_ERROR_STATS);
         if (stats == null) {
-            stats = new ErrorStats(mContext, mHandlerThread.getLooper());
+            stats = new ErrorStats(mContext, mHandlerThread.getLooper(), isTestMode());
+            registerAtom(stats.getTag(), stats);
+        }
+        return stats;
+    }
+
+    @NonNull
+    public EventStats getEventStats() {
+        EventStats stats = (EventStats) mStats.get(TELECOM_EVENT_STATS);
+        if (stats == null) {
+            stats = new EventStats(mContext, mHandlerThread.getLooper(), isTestMode());
             registerAtom(stats.getTag(), stats);
         }
         return stats;
@@ -134,14 +153,30 @@ public class TelecomMetricsController implements StatsManager.StatsPullAtomCallb
     }
 
     public void destroy() {
+        clearStats();
+        mHandlerThread.quitSafely();
+    }
+
+    public void setTestMode(boolean enabled) {
+        mIsTestMode.set(enabled);
+        clearStats();
+    }
+
+    public boolean isTestMode() {
+        return mIsTestMode.get();
+    }
+
+    private void clearStats() {
         final StatsManager statsManager = mContext.getSystemService(StatsManager.class);
         if (statsManager != null) {
-            mStats.forEach((tag, stat) -> statsManager.clearPullAtomCallback(tag));
+            mStats.forEach((tag, stat) -> {
+                statsManager.clearPullAtomCallback(tag);
+                stat.flush();
+            });
         } else {
             Log.w(TAG, "Unable to clear pulled atoms as StatsManager is null");
         }
 
         mStats.clear();
-        mHandlerThread.quitSafely();
     }
 }

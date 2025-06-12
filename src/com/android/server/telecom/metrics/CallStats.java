@@ -22,6 +22,8 @@ import static com.android.server.telecom.TelecomStatsLog.CALL_STATS__ACCOUNT_TYP
 import static com.android.server.telecom.TelecomStatsLog.CALL_STATS__ACCOUNT_TYPE__ACCOUNT_SIM;
 import static com.android.server.telecom.TelecomStatsLog.CALL_STATS__ACCOUNT_TYPE__ACCOUNT_UNKNOWN;
 import static com.android.server.telecom.TelecomStatsLog.CALL_STATS__ACCOUNT_TYPE__ACCOUNT_VOIP_API;
+import static com.android.server.telecom.TelecomStatsLog.CALL_STATS__ACCOUNT_TYPE__ACCOUNT_NON_TELECOM_VOIP;
+import static com.android.server.telecom.TelecomStatsLog.CALL_STATS__ACCOUNT_TYPE__ACCOUNT_NON_TELECOM_VOIP_WITH_TELECOM_SUPPORT;
 import static com.android.server.telecom.TelecomStatsLog.CALL_STATS__CALL_DIRECTION__DIR_INCOMING;
 import static com.android.server.telecom.TelecomStatsLog.CALL_STATS__CALL_DIRECTION__DIR_OUTGOING;
 import static com.android.server.telecom.TelecomStatsLog.CALL_STATS__CALL_DIRECTION__DIR_UNKNOWN;
@@ -40,6 +42,7 @@ import com.android.server.telecom.Call;
 import com.android.server.telecom.TelecomStatsLog;
 import com.android.server.telecom.nano.PulledAtomsClass;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -57,8 +60,8 @@ public class CallStats extends TelecomPulledAtom {
     private Map<CallStatsKey, CallStatsData> mCallStatsMap;
     private boolean mHasMultipleAudioDevices;
 
-    public CallStats(@NonNull Context context, @NonNull Looper looper) {
-        super(context, looper);
+    public CallStats(@NonNull Context context, @NonNull Looper looper, boolean isTestMode) {
+        super(context, looper, isTestMode);
     }
 
     @VisibleForTesting(otherwise = VisibleForTesting.PROTECTED)
@@ -80,7 +83,8 @@ public class CallStats extends TelecomPulledAtom {
                     TelecomStatsLog.buildStatsEvent(getTag(),
                             v.getCallDirection(), v.getExternalCall(), v.getEmergencyCall(),
                             v.getMultipleAudioAvailable(), v.getAccountType(), v.getUid(),
-                            v.getCount(), v.getAverageDurationMs())));
+                            v.getCount(), v.getAverageDurationMs(), v.getDisconnectCause(),
+                            v.getSimultaneousType(), v.getVideoCall())));
             mCallStatsMap.clear();
             onAggregate();
             return StatsManager.PULL_SUCCESS;
@@ -95,10 +99,12 @@ public class CallStats extends TelecomPulledAtom {
             mCallStatsMap = new HashMap<>();
             for (PulledAtomsClass.CallStats v : mPulledAtoms.callStats) {
                 mCallStatsMap.put(new CallStatsKey(v.getCallDirection(),
-                                v.getExternalCall(), v.getEmergencyCall(),
-                                v.getMultipleAudioAvailable(),
-                                v.getAccountType(), v.getUid()),
-                        new CallStatsData(v.getCount(), v.getAverageDurationMs()));
+                        v.getExternalCall(), v.getEmergencyCall(),
+                        v.getMultipleAudioAvailable(), v.getAccountType(),
+                        v.getUid(), v.getDisconnectCause(), v.getSimultaneousType(),
+                        v.getVideoCall()),
+                        new CallStatsData(
+                                v.getCount(), v.getAverageDurationMs()));
             }
             mLastPulledTimestamps = mPulledAtoms.getCallStatsPullTimestampMillis();
         }
@@ -123,6 +129,9 @@ public class CallStats extends TelecomPulledAtom {
             mPulledAtoms.callStats[index[0]].setMultipleAudioAvailable(k.mIsMultipleAudioAvailable);
             mPulledAtoms.callStats[index[0]].setAccountType(k.mAccountType);
             mPulledAtoms.callStats[index[0]].setUid(k.mUid);
+            mPulledAtoms.callStats[index[0]].setDisconnectCause(k.mCause);
+            mPulledAtoms.callStats[index[0]].setSimultaneousType(k.mSimultaneousType);
+            mPulledAtoms.callStats[index[0]].setVideoCall(k.mHasVideoCall);
             mPulledAtoms.callStats[index[0]].setCount(v.mCount);
             mPulledAtoms.callStats[index[0]].setAverageDurationMs(v.mAverageDuration);
             index[0]++;
@@ -131,10 +140,18 @@ public class CallStats extends TelecomPulledAtom {
     }
 
     public void log(int direction, boolean isExternal, boolean isEmergency,
-            boolean isMultipleAudioAvailable, int accountType, int uid, int duration) {
+        boolean isMultipleAudioAvailable, int accountType, int uid, int duration) {
+        log(direction, isExternal, isEmergency, isMultipleAudioAvailable, accountType, uid,
+                0, 0, false, duration);
+    }
+
+    public void log(int direction, boolean isExternal, boolean isEmergency,
+            boolean isMultipleAudioAvailable, int accountType, int uid,
+            int disconnectCause, int simultaneousType, boolean hasVideoCall, int duration) {
         post(() -> {
             CallStatsKey key = new CallStatsKey(direction, isExternal, isEmergency,
-                    isMultipleAudioAvailable, accountType, uid);
+                    isMultipleAudioAvailable, accountType, uid, disconnectCause, simultaneousType,
+                    hasVideoCall);
             CallStatsData data = mCallStatsMap.computeIfAbsent(key, k -> new CallStatsData(0, 0));
             data.add(duration);
             onAggregate();
@@ -169,8 +186,31 @@ public class CallStats extends TelecomPulledAtom {
             }
 
             log(direction, call.isExternalCall(), call.isEmergencyCall(), hasMultipleAudioDevices,
-                    accountType, uid, duration);
+                    accountType, uid, call.getDisconnectCause().getCode(),
+                    call.getSimultaneousType(), call.hasVideoCall(), duration);
         });
+    }
+
+    /**
+     * Used for logging non-telecom calls that have no associated {@link Call}.  This is inferred
+     * from the {@link com.android.server.telecom.CallAudioWatchdog}.
+     *
+     * @param hasTelecomSupport {@code true} if the app making the non-telecom call has Telecom
+     *                                      support (i.e. has a phone account};
+     *                                      {@code false} otherwise.
+     * @param uid The uid of the app making the call.
+     * @param durationMillis The duration of the call, in millis.
+     */
+    public void onNonTelecomCallEnd(final boolean hasTelecomSupport, final int uid,
+            final long durationMillis) {
+        post(() -> log(CALL_STATS__CALL_DIRECTION__DIR_UNKNOWN,
+                false /* isExternalCall */,
+                false /* isEmergencyCall */,
+                false /* hasMultipleAudioDevices  */,
+                hasTelecomSupport ?
+                        CALL_STATS__ACCOUNT_TYPE__ACCOUNT_NON_TELECOM_VOIP_WITH_TELECOM_SUPPORT :
+                        CALL_STATS__ACCOUNT_TYPE__ACCOUNT_NON_TELECOM_VOIP,
+                uid, (int) durationMillis));
     }
 
     private int getAccountType(PhoneAccount account) {
@@ -212,15 +252,28 @@ public class CallStats extends TelecomPulledAtom {
         final boolean mIsMultipleAudioAvailable;
         final int mAccountType;
         final int mUid;
+        final int mCause;
+        final int mSimultaneousType;
+        final boolean mHasVideoCall;
 
         CallStatsKey(int direction, boolean isExternal, boolean isEmergency,
-                boolean isMultipleAudioAvailable, int accountType, int uid) {
+            boolean isMultipleAudioAvailable, int accountType, int uid) {
+            this(direction, isExternal, isEmergency, isMultipleAudioAvailable, accountType, uid,
+                    0, 0, false);
+        }
+
+        CallStatsKey(int direction, boolean isExternal, boolean isEmergency,
+                boolean isMultipleAudioAvailable, int accountType, int uid,
+                int cause, int simultaneousType, boolean hasVideoCall) {
             mDirection = direction;
             mIsExternal = isExternal;
             mIsEmergency = isEmergency;
             mIsMultipleAudioAvailable = isMultipleAudioAvailable;
             mAccountType = accountType;
             mUid = uid;
+            mCause = cause;
+            mSimultaneousType = simultaneousType;
+            mHasVideoCall = hasVideoCall;
         }
 
         @Override
@@ -234,13 +287,15 @@ public class CallStats extends TelecomPulledAtom {
             return this.mDirection == obj.mDirection && this.mIsExternal == obj.mIsExternal
                     && this.mIsEmergency == obj.mIsEmergency
                     && this.mIsMultipleAudioAvailable == obj.mIsMultipleAudioAvailable
-                    && this.mAccountType == obj.mAccountType && this.mUid == obj.mUid;
+                    && this.mAccountType == obj.mAccountType && this.mUid == obj.mUid
+                    && this.mCause == obj.mCause && this.mSimultaneousType == obj.mSimultaneousType
+                    && this.mHasVideoCall == obj.mHasVideoCall;
         }
 
         @Override
         public int hashCode() {
             return Objects.hash(mDirection, mIsExternal, mIsEmergency, mIsMultipleAudioAvailable,
-                    mAccountType, mUid);
+                    mAccountType, mUid, mCause, mSimultaneousType, mHasVideoCall);
         }
 
         @Override
@@ -248,7 +303,8 @@ public class CallStats extends TelecomPulledAtom {
             return "[CallStatsKey: mDirection=" + mDirection + ", mIsExternal=" + mIsExternal
                     + ", mIsEmergency=" + mIsEmergency + ", mIsMultipleAudioAvailable="
                     + mIsMultipleAudioAvailable + ", mAccountType=" + mAccountType + ", mUid="
-                    + mUid + "]";
+                    + mUid + ", mCause=" + mCause + ", mScType=" + mSimultaneousType
+                    + ", mHasVideoCall =" + mHasVideoCall + "]";
         }
     }
 
