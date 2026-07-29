@@ -28,10 +28,10 @@ import android.telecom.ConnectionService;
 import android.telecom.DisconnectCause;
 import android.telecom.Log;
 import android.telecom.PhoneAccountHandle;
+import android.util.IndentingPrintWriter;
 import android.util.LocalLog;
 
 import com.android.internal.annotations.VisibleForTesting;
-import com.android.internal.util.IndentingPrintWriter;
 import com.android.server.telecom.metrics.TelecomMetricsController;
 import com.android.server.telecom.stats.CallStateChangedAtomWriter;
 import com.android.server.telecom.flags.FeatureFlags;
@@ -190,9 +190,7 @@ public class CallAnomalyWatchdog extends CallsManagerListenerBase implements Cal
     @Override
     public void onCallAdded(Call call) {
         maybeTrackCall(call);
-        if (mFeatureFlags.telecomMetricsSupport()) {
-            mMetricsController.getCallStats().onCallStart(call);
-        }
+        mMetricsController.getCallStats().onCallStart(call);
     }
 
     /**
@@ -214,9 +212,7 @@ public class CallAnomalyWatchdog extends CallsManagerListenerBase implements Cal
     public void onCallRemoved(Call call) {
         Log.i(this, "onCallRemoved: call=%s", call.toString());
         stopTrackingCall(call);
-        if (mFeatureFlags.telecomMetricsSupport()) {
-            mMetricsController.getCallStats().onCallEnd(call);
-        }
+        mMetricsController.getCallStats().onCallEnd(call);
         if (mFeatureFlags.callSequencingMetrics()) {
             mMetricsController.getCallSequencingStats().onCallEnd(call);
         }
@@ -430,12 +426,31 @@ public class CallAnomalyWatchdog extends CallsManagerListenerBase implements Cal
             return false;
         }
         int currentStuckState = call.getState();
-        return call.isSelfManaged() &&
-                (currentStuckState == CallState.NEW ||
-                        currentStuckState == CallState.RINGING ||
-                        currentStuckState == CallState.DIALING ||
-                        currentStuckState == CallState.CONNECTING) &&
-                isVanillaIceCreamBuildOrHigher(context, call);
+        if (com.android.internal.telecom.flags.Flags.addEscapeHatchForStuckVoip()) {
+            if (!call.isSelfManaged()) {
+                return false;
+            }
+
+            boolean isRinging = currentStuckState == CallState.RINGING;
+            boolean isOtherState = currentStuckState == CallState.NEW ||
+                    currentStuckState == CallState.DIALING ||
+                    currentStuckState == CallState.CONNECTING;
+
+            if (isRinging) {
+                return true;
+            }
+            if (isOtherState) {
+                return isVanillaIceCreamBuildOrHigher(context, call);
+            }
+            return false;
+        } else {
+            return call.isSelfManaged() &&
+                    (currentStuckState == CallState.NEW ||
+                            currentStuckState == CallState.RINGING ||
+                            currentStuckState == CallState.DIALING ||
+                            currentStuckState == CallState.CONNECTING) &&
+                    isVanillaIceCreamBuildOrHigher(context, call);
+        }
     }
 
     private boolean isVanillaIceCreamBuildOrHigher(Context context, Call call) {

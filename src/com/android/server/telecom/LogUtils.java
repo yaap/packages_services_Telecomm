@@ -135,6 +135,14 @@ public class LogUtils {
         public static final String STOP_DTMF = "STOP_DTMF";
         public static final String START_RINGER = "START_RINGER";
         public static final String STOP_RINGER = "STOP_RINGER";
+        public static final String START_CRS_RINGER_IN_MODE_RINGTONE =
+                "START_CRS_RINGER_IN_MODE_RINGTONE";
+        public static final String STOP_CRS_RINGER_IN_MODE_RINGTONE =
+                "STOP_CRS_RINGER_IN_MODE_RINGTONE";
+        public static final String START_CRS_RINGER_IN_MODE_IN_CALL =
+                "START_CRS_RINGER_IN_MODE_IN_CALL";
+        public static final String STOP_CRS_RINGER_IN_MODE_IN_CALL =
+                "STOP_CRS_RINGER_IN_MODE_IN_CALL";
         public static final String START_VIBRATOR = "START_VIBRATOR";
         public static final String STOP_VIBRATOR = "STOP_VIBRATOR";
         public static final String SKIP_VIBRATION = "SKIP_VIBRATION";
@@ -284,24 +292,6 @@ public class LogUtils {
         }
     }
 
-    private static void eventRecordAdded(EventManager.EventRecord eventRecord) {
-        // Only Calls will be added as event records in this case
-        EventManager.Loggable recordEntry = eventRecord.getRecordEntry();
-        if (recordEntry instanceof Call) {
-            Call callRecordEntry = (Call) recordEntry;
-            Analytics.CallInfo callInfo = callRecordEntry.getAnalytics();
-            if(callInfo != null) {
-                callInfo.setCallEvents(eventRecord);
-            } else {
-                if(!android.telecom.Log.isUnitTestingEnabled()) {
-                    android.telecom.Log.w(LOGUTILS_TAG, "Could not get Analytics CallInfo.");
-                }
-            }
-        } else {
-            android.telecom.Log.w(LOGUTILS_TAG, "Non-Call EventRecord Added.");
-        }
-    }
-
     public static void initLogging(Context context) {
         android.telecom.Log.d(LOGUTILS_TAG, "initLogging: attempting to acquire LogUtils sLock");
         synchronized (sLock) {
@@ -316,9 +306,6 @@ public class LogUtils {
                 for (EventManager.TimedEventPair p : Events.Timings.sTimedEvents) {
                     android.telecom.Log.addRequestResponsePair(p);
                 }
-                android.telecom.Log.registerEventListener(LogUtils::eventRecordAdded);
-                // Store analytics about recently completed Sessions.
-                android.telecom.Log.registerSessionListener(Analytics::addSessionTiming);
 
                 // Ensure LogUtils#initLogging(Context) is called once throughout the entire
                 // lifecycle of not only TelecomSystem, but the Testing Framework.

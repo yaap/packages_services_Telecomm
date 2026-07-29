@@ -46,10 +46,9 @@ import com.android.server.telecom.CallState;
 import com.android.server.telecom.CallsManager;
 import com.android.server.telecom.CallsManagerListenerBase;
 import com.android.server.telecom.Constants;
-import com.android.server.telecom.R;
 import com.android.server.telecom.TelecomBroadcastIntentProcessor;
+import com.android.server.telecom.TelecomResourceId;
 import com.android.server.telecom.UserUtil;
-import com.android.server.telecom.components.TelecomBroadcastReceiver;
 import com.android.server.telecom.flags.FeatureFlags;
 
 import java.util.Locale;
@@ -159,10 +158,11 @@ public class DisconnectedCallNotifier extends CallsManagerListenerBase {
     private void showDisconnectedNotification(@NonNull CallInfo call) {
         Log.i(this, "showDisconnectedNotification: userHandle=%d", call.userHandle.getIdentifier());
 
-        final int titleResId = R.string.notification_disconnectedCall_title;
+        final int titleResId = TelecomResourceId.getIdentifier(mContext,
+                "notification_disconnectedCall_title", "string");
         final CharSequence expandedText = call.isEmergency
-                ? mContext.getText(R.string.notification_disconnectedCall_generic_body)
-                : mContext.getString(R.string.notification_disconnectedCall_body,
+                ? TelecomResourceId.getText(mContext, "notification_disconnectedCall_generic_body")
+                : TelecomResourceId.getString(mContext, "notification_disconnectedCall_body",
                         getNameForCallNotification(call));
 
         // Create a public viewable version of the notification, suitable for display when sensitive
@@ -172,15 +172,15 @@ public class DisconnectedCallNotifier extends CallsManagerListenerBase {
         Notification.Builder publicBuilder = new Notification.Builder(contextForUser,
                 NotificationChannelManager.CHANNEL_ID_DISCONNECTED_CALLS);
         publicBuilder.setSmallIcon(android.R.drawable.stat_notify_error)
-                .setColor(mContext.getResources().getColor(R.color.theme_color, null /*theme*/))
+                .setColor(TelecomResourceId.getColor(mContext, "theme_color"))
                 // Set when the call was disconnected.
                 .setWhen(call.endTimeMs)
                 .setShowWhen(true)
                 // Show "Phone" for notification title.
-                .setContentTitle(mContext.getText(R.string.userCallActivityLabel))
+                .setContentTitle(TelecomResourceId.getText(mContext, "userCallActivityLabel"))
                 // Notification details shows that there are disconnected call(s), but does not
                 // reveal the caller information.
-                .setContentText(mContext.getText(titleResId))
+                .setContentText(TelecomResourceId.getTelecomContext(mContext).getText(titleResId))
                 .setAutoCancel(true);
 
         if (!call.isEmergency) {
@@ -191,10 +191,11 @@ public class DisconnectedCallNotifier extends CallsManagerListenerBase {
         Notification.Builder builder = new Notification.Builder(contextForUser,
                 NotificationChannelManager.CHANNEL_ID_DISCONNECTED_CALLS);
         builder.setSmallIcon(android.R.drawable.stat_notify_error)
-                .setColor(mContext.getResources().getColor(R.color.theme_color, null /*theme*/))
+                .setColor(TelecomResourceId.getColor(mContext, "theme_color"))
                 .setWhen(call.endTimeMs)
                 .setShowWhen(true)
-                .setContentTitle(mContext.getText(titleResId))
+                .setContentTitle(TelecomResourceId.getText(mContext,
+                        "notification_disconnectedCall_title"))
                 //Only show expanded text for sensitive information
                 .setStyle(new Notification.BigTextStyle().bigText(expandedText))
                 .setAutoCancel(true)
@@ -211,19 +212,23 @@ public class DisconnectedCallNotifier extends CallsManagerListenerBase {
         String handle = call.handle != null ? call.handle.getSchemeSpecificPart() : null;
 
         if (!TextUtils.isEmpty(handle)
-                && !TextUtils.equals(handle, mContext.getString(R.string.handle_restricted))
+                && !TextUtils.equals(handle,
+                        TelecomResourceId.getString(mContext, "handle_restricted"))
                 && !call.isEmergency) {
             builder.addAction(new Notification.Action.Builder(
-                    Icon.createWithResource(contextForUser, R.drawable.ic_phone_24dp),
+                    Icon.createWithResource(contextForUser,TelecomResourceId.getIdentifier(
+                            contextForUser, "ic_phone_24dp", "drawable")),
                     // Reuse missed call "Call back"
-                    mContext.getString(R.string.notification_missedCall_call_back),
+                    TelecomResourceId.getString(mContext, "notification_missedCall_call_back"),
                     createCallBackPendingIntent(call.handle, call.userHandle)).build());
 
             if (canRespondViaSms(call)) {
                 builder.addAction(new Notification.Action.Builder(
-                        Icon.createWithResource(contextForUser, R.drawable.ic_message_24dp),
+                        Icon.createWithResource(contextForUser,
+                                TelecomResourceId.getIdentifier(contextForUser,
+                                       "ic_message_24dp", "drawable")),
                         // Reuse missed call "Call back"
-                        mContext.getString(R.string.notification_missedCall_message),
+                        TelecomResourceId.getString(mContext, "notification_missedCall_message"),
                         createSendSmsFromNotificationPendingIntent(call.handle,
                                 call.userHandle)).build());
             }
@@ -245,7 +250,7 @@ public class DisconnectedCallNotifier extends CallsManagerListenerBase {
             // TODO: Only support one notification right now, so if multiple are hung up, we only
             // show the last one. Support multiple in the future.
             UserUtil.processNotification(mContext, call.userHandle, NOTIFICATION_TAG,
-                    DISCONNECTED_CALL_NOTIFICATION_ID, notification, mFeatureFlags);
+                    DISCONNECTED_CALL_NOTIFICATION_ID, notification);
         } finally {
             Binder.restoreCallingIdentity(token);
         }
@@ -280,7 +285,7 @@ public class DisconnectedCallNotifier extends CallsManagerListenerBase {
             return bidiFormatter.unicodeWrap(number, TextDirectionHeuristics.LTR);
         } else {
             // Use "unknown" if the call is unidentifiable.
-            return mContext.getString(R.string.unknown);
+            return TelecomResourceId.getString(mContext, "unknown");
         }
     }
 
@@ -340,9 +345,12 @@ public class DisconnectedCallNotifier extends CallsManagerListenerBase {
      */
     private PendingIntent createTelecomPendingIntent(String action, Uri data,
             UserHandle userHandle) {
-        Intent intent = new Intent(action, data, mContext, TelecomBroadcastReceiver.class);
+        Intent intent = new Intent(action);
+        intent.setPackage(mContext.getPackageName());
+        intent.putExtra(TelecomBroadcastIntentProcessor.EXTRA_DATA_URI, data);
         intent.putExtra(TelecomBroadcastIntentProcessor.EXTRA_USERHANDLE, userHandle);
-        return PendingIntent.getBroadcast(mContext, 0, intent,
+        int requestCode = data == null ? 0 : data.hashCode();
+        return PendingIntent.getBroadcast(mContext, requestCode, intent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
     }
 
@@ -361,25 +369,14 @@ public class DisconnectedCallNotifier extends CallsManagerListenerBase {
         Intent intent = new Intent(Intent.ACTION_VIEW, null);
         intent.setType(CallLog.Calls.CONTENT_TYPE);
 
-        PendingIntent pendingIntent;
-        if (mFeatureFlags.resolveHiddenDependenciesTwo()) {
-            Intent[] myIntents = {intent};
-            Context context = mContext.createContextAsUser(userHandle, 0);
-            pendingIntent = PendingIntent.getActivities(
-                    context,
-                    0 /* requestCode */,
-                    myIntents,
-                    PendingIntent.FLAG_IMMUTABLE,
-                    null);
-        } else {
-            TaskStackBuilder taskStackBuilder = TaskStackBuilder.create(mContext);
-            taskStackBuilder.addNextIntent(intent);
-            pendingIntent = taskStackBuilder.getPendingIntent(
-                    0,
-                    PendingIntent.FLAG_IMMUTABLE,
-                    null,
-                    userHandle);
-        }
+        Intent[] myIntents = {intent};
+        Context context = mContext.createContextAsUser(userHandle, 0);
+        PendingIntent pendingIntent = PendingIntent.getActivities(
+                context,
+                0 /* requestCode */,
+                myIntents,
+                PendingIntent.FLAG_IMMUTABLE,
+                null);
         return pendingIntent;
     }
 
@@ -403,7 +400,7 @@ public class DisconnectedCallNotifier extends CallsManagerListenerBase {
         long token = Binder.clearCallingIdentity();
         try {
             UserUtil.processNotification(mContext, userHandle, NOTIFICATION_TAG,
-                    DISCONNECTED_CALL_NOTIFICATION_ID, null /* notification */, mFeatureFlags);
+                    DISCONNECTED_CALL_NOTIFICATION_ID, null /* notification */);
         } finally {
             Binder.restoreCallingIdentity(token);
         }

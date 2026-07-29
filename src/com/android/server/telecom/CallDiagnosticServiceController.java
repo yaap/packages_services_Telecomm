@@ -42,9 +42,9 @@ import android.telecom.ParcelableCall;
 import android.telephony.CallQuality;
 import android.telephony.ims.ImsReasonInfo;
 import android.text.TextUtils;
+import android.util.IndentingPrintWriter;
 
 import com.android.internal.telecom.ICallDiagnosticService;
-import com.android.internal.util.IndentingPrintWriter;
 
 import java.util.List;
 
@@ -554,7 +554,7 @@ public class CallDiagnosticServiceController extends CallsManagerListenerBase {
      * @param value The message value.
      */
     private void handleSendD2DMessage(@NonNull String callId,
-            @CallDiagnostics.MessageType int message, int value) {
+            /*@CallDiagnostics.MessageType*/ int message, int value) {
         Call call = mCallIdMapper.getCall(callId);
         if (call == null) {
             Log.w(this, "handleSendD2DMessage: callId=%s; msg=%d/%d; invalid call", callId,

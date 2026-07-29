@@ -19,7 +19,6 @@ package com.android.server.telecom;
 import static android.provider.CallLog.Calls.USER_MISSED_DND_MODE;
 import static android.provider.CallLog.Calls.USER_MISSED_LOW_RING_VOLUME;
 import static android.provider.CallLog.Calls.USER_MISSED_NO_VIBRATE;
-import static android.provider.Settings.Global.ZEN_MODE_OFF;
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
@@ -34,7 +33,7 @@ import android.media.AudioAttributes;
 import android.media.AudioManager;
 import android.media.Ringtone;
 import android.media.RingtoneManager;
-import android.media.Utils;
+import android.media.RingtoneVibrationUtils;
 import android.media.VolumeShaper;
 import android.media.audio.Flags;
 import android.net.Uri;
@@ -47,8 +46,6 @@ import android.os.UserManager;
 import android.os.VibrationAttributes;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
-import android.os.vibrator.persistence.ParsedVibration;
-import android.os.vibrator.persistence.VibrationXmlParser;
 import android.provider.Settings;
 import android.telecom.Log;
 import android.telecom.TelecomManager;
@@ -67,8 +64,8 @@ import java.util.ArrayList;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
@@ -98,7 +95,7 @@ public class Ringer {
 
     public interface AccessibilityManagerAdapter {
         boolean startFlashNotificationSequence(@NonNull Context context,
-                @AccessibilityManager.FlashNotificationReason int reason);
+                /* @AccessibilityManager.FlashNotificationReason */ int reason);
         boolean stopFlashNotificationSequence(@NonNull Context context);
     }
     /**
@@ -109,10 +106,6 @@ public class Ringer {
     public static class VibrationEffectProxy {
         public VibrationEffect createWaveform(long[] timings, int[] amplitudes, int repeat) {
             return VibrationEffect.createWaveform(timings, amplitudes, repeat);
-        }
-
-        public VibrationEffect get(Uri ringtoneUri, Context context) {
-            return VibrationEffect.get(ringtoneUri, context);
         }
     }
     @VisibleForTesting
@@ -262,11 +255,6 @@ public class Ringer {
 
     private static VolumeShaper.Configuration mVolumeShaperConfig;
 
-    public static final UUID GET_RINGER_MODE_ANOMALY_UUID =
-            UUID.fromString("eb10505b-4d7b-4fab-b4a1-a18186799065");
-    public static final String GET_RINGER_MODE_ANOMALY_MSG = "AM#GetRingerMode() and"
-            + " AM#GetRingerModeInternal() are returning diff values when DoNotDisturb is OFF!";
-
     /**
      * Used to keep ordering of unanswered incoming calls. There can easily exist multiple incoming
      * calls and explicit ordering is useful for maintaining the proper state of the ringer.
@@ -283,6 +271,8 @@ public class Ringer {
     private final FeatureFlags mFlags;
     private final boolean mRingtoneVibrationSupported;
     private final AnomalyReporterAdapter mAnomalyReporter;
+    private RingerAttributes mRingerAttributes;
+    private final CrsAudioController mCrsAudioController;
 
     /**
      * For unit testing purposes only; when set, {@link #startRinging(Call, boolean)} will complete
@@ -357,7 +347,8 @@ public class Ringer {
             FeatureFlags featureFlags,
             AnomalyReporterAdapter anomalyReporter,
             CallConnectedIndicatorSettings callConnectedIndicator,
-            Executor asyncTaskExecutor) {
+            Executor asyncTaskExecutor,
+            CrsAudioController crsAudioController) {
 
         mLock = new Object();
         mSystemSettingsUtil = systemSettingsUtil;
@@ -376,18 +367,20 @@ public class Ringer {
         mUseSimplePattern = mContext.getResources().getBoolean(R.bool.use_simple_vibration_pattern);
 
         mDefaultVibrationEffect =
-                loadDefaultRingVibrationEffect(
-                        mContext, mVibrator.getVibrator(), mVibrationEffectProxy, featureFlags);
+                loadDefaultRingVibrationEffect(mContext, mVibrationEffectProxy, featureFlags);
 
         mIsHapticPlaybackSupportedByDevice =
                 mSystemSettingsUtil.isHapticPlaybackSupported(mContext);
 
         mAudioManager = mContext.getSystemService(AudioManager.class);
         mFlags = featureFlags;
-        mRingtoneVibrationSupported = mContext.getResources().getBoolean(
-                com.android.internal.R.bool.config_ringtoneVibrationSettingsSupported);
+        Resources res = mContext.getResources();
+        int resourceId = Resources.getSystem().getIdentifier(
+                "config_ringtoneVibrationSettingsSupported", "bool", "android");
+        mRingtoneVibrationSupported = res.getBoolean(resourceId);
         mCallConnectedIndicatorSettings = callConnectedIndicator;
         mAsyncTaskExecutor = asyncTaskExecutor;
+        mCrsAudioController = crsAudioController;
     }
 
     public void shutdownExecutor() {
@@ -445,36 +438,35 @@ public class Ringer {
                     .supplyAsync(() -> getRingerAttributes(foregroundCall, isHfpDeviceAttached),
                             getLoggedExecutor("R.sR"));
 
-            RingerAttributes attributes = null;
             try {
-                attributes = ringerAttributesFuture.get(
+                mRingerAttributes = ringerAttributesFuture.get(
                         RINGER_ATTRIBUTES_TIMEOUT, TimeUnit.MILLISECONDS);
             } catch (ExecutionException | InterruptedException | TimeoutException e) {
                 // Keep attributes as null
                 Log.i(this, "getAttributes error: " + e);
             }
 
-            if (attributes == null) {
+            if (mRingerAttributes == null) {
                 Log.addEvent(foregroundCall, LogUtils.Events.SKIP_RINGING,
                         "RingerAttributes error");
                 return false;
             }
 
-            Log.i(this, "startRinging: attributes=%s", attributes);
+            Log.i(this, "startRinging: attributes=%s", mRingerAttributes);
 
-            if (attributes.isEndEarly()) {
-                boolean acquireAudioFocus = attributes.shouldAcquireAudioFocus();
-                if (attributes.letDialerHandleRinging()) {
+            if (mRingerAttributes.isEndEarly()) {
+                boolean acquireAudioFocus = mRingerAttributes.shouldAcquireAudioFocus();
+                if (mRingerAttributes.letDialerHandleRinging()) {
                     Log.addEvent(foregroundCall, LogUtils.Events.SKIP_RINGING, "Dialer handles");
                     // Dialer will setup a ringtone, provide the audio focus if its audible.
-                    acquireAudioFocus |= attributes.isRingerAudible();
+                    acquireAudioFocus |= mRingerAttributes.isRingerAudible();
                 }
 
-                if (attributes.isSilentRingingRequested()) {
+                if (mRingerAttributes.isSilentRingingRequested()) {
                     Log.addEvent(foregroundCall, LogUtils.Events.SKIP_RINGING, "Silent ringing "
                             + "requested");
                 }
-                if (attributes.isWorkProfileInQuietMode()) {
+                if (mRingerAttributes.isWorkProfileInQuietMode()) {
                     Log.addEvent(foregroundCall, LogUtils.Events.SKIP_RINGING,
                             "Work profile in quiet mode");
                 }
@@ -484,23 +476,19 @@ public class Ringer {
             stopCallWaiting();
 
             Context userContext = null;
-            if (mFlags.ringerVibrationUserAware()) {
-                try {
-                    userContext = mContext.createContextAsUser(UserHandle.CURRENT, 0 /* flags */);
-                } catch (Exception e) {
-                    Log.i(this, "createContextAsUser fail exception=[%s]", e.toString());
-                } finally {
-                    if (userContext == null) {
-                        userContext = mContext;
-                    }
+            try {
+                userContext = mContext.createContextAsUser(UserHandle.CURRENT, 0 /* flags */);
+            } catch (Exception e) {
+                Log.i(this, "createContextAsUser fail exception=[%s]", e.toString());
+            } finally {
+                if (userContext == null) {
+                    userContext = mContext;
                 }
-            } else {
-                userContext = mContext;
             }
             // Determine if the settings and DND mode indicate that the vibrator can be used right
             // now.
             final boolean isVibratorEnabled =
-                    isVibratorEnabled(userContext, attributes.shouldRingForContact());
+                    isVibratorEnabled(userContext, mRingerAttributes.shouldRingForContact());
             boolean shouldApplyRampingRinger =
                     isVibratorEnabled && mSystemSettingsUtil.isRampingRingerEnabled(userContext);
 
@@ -515,13 +503,13 @@ public class Ringer {
             if (torchMode != 0) {
                 switch (torchMode) {
                     case 1: // Flash when ringer is audible
-                        shouldFlash = attributes.isRingerAudible();
+                        shouldFlash = mRingerAttributes.isRingerAudible();
                         break;
                     case 2: // Flash when ringer is not audible
-                        shouldFlash = !attributes.isRingerAudible();
+                        shouldFlash = !mRingerAttributes.isRingerAudible();
                         break;
                     case 3: // Flash when entirely silent (no vibration or sound)
-                        shouldFlash = !isVibratorEnabled && !attributes.isRingerAudible();
+                        shouldFlash = !isVibratorEnabled && !mRingerAttributes.isRingerAudible();
                         break;
                     case 4: // Flash always
                         shouldFlash = true;
@@ -547,12 +535,20 @@ public class Ringer {
             String vibratorAttrs = String.format("hasVibrator=%b, userRequestsVibrate=%b, "
                             + "ringerMode=%d, isVibratorEnabled=%b",
                     mVibrator.hasVibrator(),
-                    mSystemSettingsUtil.isRingVibrationEnabled(userContext, mFlags),
+                    mSystemSettingsUtil.isRingVibrationEnabled(userContext),
                     mAudioManager.getRingerMode(), isVibratorEnabled);
 
-            if (attributes.isRingerAudible()) {
+            if (mRingerAttributes.isRingerAudible()) {
                 mRingingCall = foregroundCall;
-                Log.addEvent(foregroundCall, LogUtils.Events.START_RINGER);
+                if (mRingerAttributes.getRingtoneType() == Call.RINGTONE_SOURCE_LOCAL) {
+                    Log.addEvent(foregroundCall, LogUtils.Events.START_RINGER);
+                } else if (mRingerAttributes.getRingtoneType()
+                        == Call.RINGTONE_SOURCE_NETWORK_RING_MODE) {
+                    Log.addEvent(foregroundCall, LogUtils.Events.START_CRS_RINGER_IN_MODE_RINGTONE);
+                } else if (mRingerAttributes.getRingtoneType()
+                        == Call.RINGTONE_SOURCE_NETWORK_IN_CALL_MODE) {
+                    Log.addEvent(foregroundCall, LogUtils.Events.START_CRS_RINGER_IN_MODE_IN_CALL);
+                }
                 // Because we wait until a contact info query to complete before processing a
                 // call (for the purposes of direct-to-voicemail), the information about custom
                 // ringtones should be available by the time this code executes. We can safely
@@ -597,7 +593,7 @@ public class Ringer {
                 }
             } else {
                 Log.addEvent(foregroundCall, LogUtils.Events.SKIP_RINGING,
-                        "Inaudible: " + attributes.getInaudibleReason()
+                        "Inaudible: " + mRingerAttributes.getInaudibleReason()
                                 + " isVibratorEnabled=" + isVibratorEnabled);
 
                 if (isVibratorEnabled) {
@@ -610,12 +606,12 @@ public class Ringer {
                     foregroundCall.setUserMissed(USER_MISSED_NO_VIBRATE);
                     Log.addEvent(foregroundCall, LogUtils.Events.SKIP_VIBRATION,
                             vibratorAttrs);
-                    return attributes.shouldAcquireAudioFocus(); // ringer not audible
+                    return mRingerAttributes.shouldAcquireAudioFocus(); // ringer not audible
                 }
             }
 
             boolean hapticChannelsMuted = !isVibratorEnabled || !mIsHapticPlaybackSupportedByDevice;
-            if (shouldApplyRampingRinger
+            if (mRingerAttributes.isRingerAudible() && shouldApplyRampingRinger
                     && !mSystemSettingsUtil.isAudioCoupledVibrationForRampingRingerEnabled()
                     && isVibratorEnabled) {
                 Log.i(this, "Muted haptic channels since audio coupled ramping ringer is disabled");
@@ -628,7 +624,8 @@ public class Ringer {
             // Defer ringtone creation to the async player thread.
             Supplier<Pair<Uri, Ringtone>> ringtoneInfoSupplier = null;
             final boolean finalHapticChannelsMuted = hapticChannelsMuted;
-            if (!isHapticOnly) {
+            if (!isHapticOnly
+                    && mRingerAttributes.getRingtoneType() == Call.RINGTONE_SOURCE_LOCAL) {
                 ringtoneInfoSupplier = () -> mRingtoneFactory.getRingtone(
                         foregroundCall, mVolumeShaperConfig, finalHapticChannelsMuted);
             } else if (useCustomVibration(foregroundCall)) {
@@ -637,7 +634,7 @@ public class Ringer {
             }
             Log.i(this, "isRingtoneInfoSupplierNull=[%b]", ringtoneInfoSupplier == null);
             // If vibration will be done, reserve the vibrator.
-            boolean vibratorReserved = isVibratorEnabled && attributes.shouldRingForContact()
+            boolean vibratorReserved = isVibratorEnabled && mRingerAttributes.shouldRingForContact()
                 && tryReserveVibration(foregroundCall);
             if (!vibratorReserved) {
                 foregroundCall.setUserMissed(USER_MISSED_NO_VIBRATE);
@@ -668,16 +665,8 @@ public class Ringer {
                         // vibrator wasn't reserved. This still triggers the mBlockOnRingingFuture.
                         return;
                     }
-                    final VibrationEffect vibrationEffect;
                     updateVibrationPattern();
-                    if (ringtone != null && finalUseCustomVibrationEffect) {
-                        if (DEBUG_RINGER) {
-                            Log.d(this, "Using ringtone defined vibration effect.");
-                        }
-                        vibrationEffect = getVibrationEffectForRingtone(ringtoneUri);
-                    } else {
-                        vibrationEffect = mDefaultVibrationEffect;
-                    }
+                    final VibrationEffect vibrationEffect = mDefaultVibrationEffect;
 
                     boolean isUsingAudioCoupledHaptics =
                             !finalHapticChannelsMuted && ringtone != null
@@ -692,7 +681,12 @@ public class Ringer {
                 }
             };
             deferBlockOnRingingFuture = true;  // Run in vibrationLogic.
-            if (ringtoneInfoSupplier != null) {
+            if (foregroundCall.isCrsCall()) {
+                if (mCrsAudioController != null) {
+                    mCrsAudioController.configureCrsRingVolume(mRingerAttributes);
+                }
+                afterRingtoneLogic.accept(/* ringtoneUri, ringtone = */ null, /* stopped= */ false);
+            } else if (ringtoneInfoSupplier != null) {
                 mRingtonePlayer.play(ringtoneInfoSupplier, afterRingtoneLogic, isHfpDeviceAttached);
             } else {
                 afterRingtoneLogic.accept(/* ringtoneUri, ringtone = */ null, /* stopped= */ false);
@@ -700,8 +694,8 @@ public class Ringer {
 
             // shouldAcquireAudioFocus is meant to be true, but that check is deferred to here
             // because until now is when we actually know if the ringtone loading worked.
-            return attributes.shouldAcquireAudioFocus()
-                    || (!isHapticOnly && attributes.isRingerAudible());
+            return mRingerAttributes.shouldAcquireAudioFocus()
+                    || (!isHapticOnly && mRingerAttributes.isRingerAudible());
         } finally {
             // This is used to signal to tests that the async play() call has completed. It can
             // be deferred into AsyncRingtonePlayer
@@ -712,17 +706,23 @@ public class Ringer {
     }
 
     private boolean useCustomVibration(@NonNull Call foregroundCall) {
-        return Flags.enableRingtoneHapticsCustomization() && mRingtoneVibrationSupported
-                && hasExplicitVibration(foregroundCall);
+        return mRingtoneVibrationSupported && hasExplicitVibration(foregroundCall);
     }
 
     private boolean hasExplicitVibration(@NonNull Call foregroundCall) {
         final Uri ringtoneUri = foregroundCall.getRingtone();
         if (ringtoneUri != null) {
-            return Utils.hasVibrationParameter(ringtoneUri);
+            return RingtoneVibrationUtils.hasVibrationParameter(ringtoneUri);
         }
-        return Utils.hasVibrationParameter(RingtoneManager.getActualDefaultRingtoneUri(
-                mContext, RingtoneManager.TYPE_RINGTONE));
+        if (Flags.supportPerPhoneAccountRingtone()) {
+            return RingtoneVibrationUtils.hasVibrationParameter(
+                    RingtoneManager.getRingtoneUriForPhoneAccountHandle(
+                            mContext, foregroundCall.getTargetPhoneAccount()));
+        } else {
+            return RingtoneVibrationUtils.hasVibrationParameter(
+                    RingtoneManager.getActualDefaultRingtoneUri(
+                            mContext, RingtoneManager.TYPE_RINGTONE));
+        }
     }
 
     /**
@@ -756,8 +756,8 @@ public class Ringer {
             return;
         }
 
-        if (Flags.enableRingtoneHapticsCustomization() && mRingtoneVibrationSupported
-                && Utils.hasVibrationParameter(ringtoneUri)) {
+        if (mRingtoneVibrationSupported
+                && RingtoneVibrationUtils.hasVibrationParameter(ringtoneUri)) {
             Log.addEvent(
                     foregroundCall, LogUtils.Events.SKIP_VIBRATION, "using custom haptics");
             return;
@@ -769,7 +769,7 @@ public class Ringer {
                 Log.addEvent(foregroundCall, LogUtils.Events.START_VIBRATOR,
                     "hasVibrator=%b, userRequestsVibrate=%b, ringerMode=%d, isVibrating=%b",
                         mVibrator.hasVibrator(),
-                        mSystemSettingsUtil.isRingVibrationEnabled(mContext, mFlags),
+                        mSystemSettingsUtil.isRingVibrationEnabled(mContext),
                     mAudioManager.getRingerMode(), mIsVibrating);
                 mIsVibrating = true;
                 mVibrator.vibrate(effect, VIBRATION_ATTRIBUTES);
@@ -781,27 +781,6 @@ public class Ringer {
                         (mVibratingCall == null ? "null" : mVibratingCall.getId()));
             }
             // else stopped already: this isn't started unless a reservation was made.
-        }
-    }
-
-    private VibrationEffect getVibrationEffectForRingtone(Uri ringtoneUri) {
-        if (ringtoneUri == null) {
-            return mDefaultVibrationEffect;
-        }
-        try {
-            VibrationEffect effect = mVibrationEffectProxy.get(ringtoneUri, mContext);
-            if (effect == null) {
-              Log.i(this, "did not find vibration effect, falling back to default vibration");
-              return mDefaultVibrationEffect;
-            }
-            return effect;
-        } catch (IllegalArgumentException iae) {
-            // Deep in the bowels of the VibrationEffect class it is possible for an
-            // IllegalArgumentException to be thrown if there is an invalid URI specified in the
-            // device config, or a content provider failure.  Rather than crashing the Telecom
-            // process we will just use the default vibration effect.
-            Log.e(this, iae, "getVibrationEffectForRingtone: failed to get vibration effect");
-            return mDefaultVibrationEffect;
         }
     }
 
@@ -843,24 +822,25 @@ public class Ringer {
         final Call foregroundCall = mRingingCall != null ? mRingingCall : mVibratingCall;
         if (mAccessibilityManagerAdapter != null) {
             Log.addEvent(foregroundCall, LogUtils.Events.FLASH_NOTIFICATION_STOP);
-            if (mFlags.resolveHiddenDependenciesTwo()) {
-                getExecutor().execute(() ->
-                        mAccessibilityManagerAdapter.stopFlashNotificationSequence(mContext));
-            } else {
-                getHandler().post(() ->
-                        mAccessibilityManagerAdapter.stopFlashNotificationSequence(mContext));
-            }
+            getExecutor().execute(() ->
+                    mAccessibilityManagerAdapter.stopFlashNotificationSequence(mContext));
         }
 
         synchronized (mLock) {
-            if (mRingingCall != null) {
-                Log.addEvent(mRingingCall, LogUtils.Events.STOP_RINGER);
-                mRingingCall = null;
+            if (mRingerAttributes != null
+                    && mRingerAttributes.getRingtoneType() == Call.RINGTONE_SOURCE_LOCAL) {
+                if (mRingingCall != null) {
+                    Log.addEvent(mRingingCall, LogUtils.Events.STOP_RINGER);
+                    mRingingCall = null;
+                }
+                mRingtonePlayer.stop();
+                mIsFlashing = false;
+                getTorchHandler().removeCallbacksAndMessages(null);
             }
-
-            mRingtonePlayer.stop();
-            mIsFlashing = false;
-            getTorchHandler().removeCallbacksAndMessages(null);
+            if (foregroundCall != null && mCrsAudioController != null) {
+                mCrsAudioController.resetCrsAudioVolume(foregroundCall, mRingerAttributes);
+            }
+            mRingerAttributes = null;
 
             if (mIsVibrating) {
                 Log.addEvent(mVibratingCall, LogUtils.Events.STOP_VIBRATOR);
@@ -885,7 +865,11 @@ public class Ringer {
     }
 
     public boolean isRinging() {
-        return mRingtonePlayer.isPlaying();
+        return mRingtonePlayer.isPlaying()
+                || (mRingerAttributes != null
+                && (mRingerAttributes.getRingtoneType() == Call.RINGTONE_SOURCE_NETWORK_RING_MODE
+                || mRingerAttributes.getRingtoneType() == Call.RINGTONE_SOURCE_NETWORK_IN_CALL_MODE)
+        );
     }
 
     /**
@@ -901,20 +885,11 @@ public class Ringer {
             return !call.isCallSuppressedByDoNotDisturb();
         }
         Uri contactUri = call.getHandle();
-        if (mFlags.telecomResolveHiddenDependencies()) {
-            if (contactUri == null) {
-                contactUri = Uri.EMPTY;
-            }
-            return mNotificationManager.matchesCallFilter(contactUri);
-        } else {
-            final Bundle peopleExtras = new Bundle();
-            if (contactUri != null) {
-                ArrayList<Person> personList = new ArrayList<>();
-                personList.add(new Person.Builder().setUri(contactUri.toString()).build());
-                peopleExtras.putParcelableArrayList(Notification.EXTRA_PEOPLE_LIST, personList);
-            }
-            return mNotificationManager.matchesCallFilter(peopleExtras);
+        if (contactUri == null) {
+            contactUri = Uri.EMPTY;
         }
+        boolean matchesCallFilter = mNotificationManager.matchesCallFilter(contactUri);
+        return matchesCallFilter;
     }
 
     private boolean hasExternalRinger(Call foregroundCall) {
@@ -930,49 +905,56 @@ public class Ringer {
         AudioManager audioManager = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
         // Use AudioManager#getRingerMode for more accurate result, instead of
         // AudioManager#getRingerModeInternal which only useful for volume controllers
-        boolean zenModeOn;
-        if (mFlags.resolveHiddenDependenciesTwo()) {
-            // See NotificationManager#zenModeToInterruptionFilter; INTERRUPTION_FILTER_ALL is
-            // equivalent to the former ZEN_MODE_OFF.
-            zenModeOn = mNotificationManager != null
-                    && mNotificationManager.getCurrentInterruptionFilter()
-                    != NotificationManager.INTERRUPTION_FILTER_ALL;
-        } else {
-            zenModeOn = mNotificationManager != null
-                    && mNotificationManager.getZenMode() != ZEN_MODE_OFF;
-        }
-        maybeGenAnomReportForGetRingerMode(zenModeOn, audioManager);
-        return mVibrator.hasVibrator()
-                && mSystemSettingsUtil.isRingVibrationEnabled(context, mFlags)
-                && (audioManager.getRingerMode() != AudioManager.RINGER_MODE_SILENT
-                || (zenModeOn && shouldRingForContact));
-    }
+        // See NotificationManager#zenModeToInterruptionFilter; INTERRUPTION_FILTER_ALL is
+        // equivalent to the former ZEN_MODE_OFF.
+        boolean zenModeOn = mNotificationManager != null
+                && mNotificationManager.getCurrentInterruptionFilter()
+                != NotificationManager.INTERRUPTION_FILTER_ALL;
 
-    /**
-     * There are 3 settings for haptics:
-     * - AudioManager.RINGER_MODE_SILENT
-     * - AudioManager.RINGER_MODE_VIBRATE
-     * - AudioManager.RINGER_MODE_NORMAL
-     * If the user does not have {@link AudioManager#RINGER_MODE_SILENT} set, the user should
-     * have haptic feeback
-     *
-     * Note: If DND/ZEN_MODE is on, {@link AudioManager#getRingerMode()} will return
-     * {@link AudioManager#RINGER_MODE_SILENT}, regardless of the user setting. Therefore,
-     * getRingerModeInternal is the source of truth instead of {@link AudioManager#getRingerMode()}.
-     * However, if DND/ZEN_MOD is off, the APIs should return the same value.  Generate an anomaly
-     * report if they diverge.
-     */
-    private void maybeGenAnomReportForGetRingerMode(boolean isZenModeOn, AudioManager am) {
-        if (!isZenModeOn) {
-            int ringerMode = am.getRingerMode();
-            int ringerModeInternal = am.getRingerModeInternal();
-            if (ringerMode != ringerModeInternal) {
-                Log.i(this, "getRingerMode=[%d], getRingerModeInternal=[%d]",
-                        ringerMode, ringerModeInternal);
-                mAnomalyReporter.reportAnomaly(GET_RINGER_MODE_ANOMALY_UUID,
-                        GET_RINGER_MODE_ANOMALY_MSG);
+        boolean hasVibrator = mVibrator.hasVibrator();
+        int ringerMode = audioManager.getRingerMode();
+        // Check if ring vibration is effectively enabled.
+        //   This verifies two layers of settings:
+        //   1. The specific 'Vibrate for calls' toggle (VIBRATE_WHEN_RINGING).
+        //   2. The global master 'Use vibration & haptics' toggle (VIBRATE_ON),
+        //      which overrides all others.
+        boolean isRingVibrationEnabled = mSystemSettingsUtil.isRingVibrationEnabled(context);
+        // Determine if the call should ring/vibrate even when Zen Mode (Do Not Disturb) is on,
+        // based on whether the contact is allowed to bypass DND.
+        boolean shouldRingForContactInZen = zenModeOn && shouldRingForContact;
+
+        boolean shouldVibrate;
+
+        if (!hasVibrator) {
+            shouldVibrate = false;
+        } else if (isRingVibrationEnabled) {
+            if (ringerMode != AudioManager.RINGER_MODE_SILENT) {
+                shouldVibrate = true;
+            } else {
+                shouldVibrate = shouldRingForContactInZen;
             }
+        } else {
+            shouldVibrate = false;
         }
+
+        String ringerModeString;
+        if (ringerMode == AudioManager.RINGER_MODE_SILENT) {
+            ringerModeString = "SILENT";
+        } else if (ringerMode == AudioManager.RINGER_MODE_VIBRATE) {
+            ringerModeString = "VIBRATE";
+        } else if (ringerMode == AudioManager.RINGER_MODE_NORMAL) {
+            ringerModeString = "NORMAL";
+        } else {
+            ringerModeString = "UNKNOWN (" + ringerMode + ")";
+        }
+
+        Log.i(this, "isVibratorEnabled: hasVibrator=%b, ringerMode=%s, isRingVibrationEnabled=%b, "
+                        + "zenModeOn=%b, shouldRingForContact=%b, shouldRingForContactInZen=%b"
+                        + " -> result=%b",
+                hasVibrator, ringerModeString, isRingVibrationEnabled, zenModeOn,
+                shouldRingForContact, shouldRingForContactInZen, shouldVibrate);
+
+        return shouldVibrate;
     }
 
     private RingerAttributes getRingerAttributes(Call call, boolean isHfpDeviceAttached) {
@@ -983,10 +965,7 @@ public class Ringer {
 
         boolean isVolumeOverZero;
 
-        AudioAttributes aa = new AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build();
-        isVolumeOverZero = mAudioManager.shouldNotificationSoundPlay(aa);
+        isVolumeOverZero = mAudioManager.getStreamVolume(AudioManager.STREAM_RING) > 0;
 
         timer.record("isVolumeOverZero");
         boolean shouldRingForContact = shouldRingForContact(call);
@@ -1041,7 +1020,7 @@ public class Ringer {
         // 2. Volume is over zero, we should ring for the contact, and there's a audible ringtone
         //    present. (This check is deferred until ringer knows the ringtone)
         boolean shouldAcquireAudioFocus;
-        if (mFlags.voipDndFocus()) {
+        if (com.android.internal.telecom.flags.Flags.voipDndFocus()) {
             shouldAcquireAudioFocus = !isWorkProfileInQuietMode &&
                     // The previous logic for determining if audio focus should be acquired
                     // assumed we should ALWAYS acquire audio focus for a voip call.  For non-voip
@@ -1055,6 +1034,12 @@ public class Ringer {
         } else {
             shouldAcquireAudioFocus = !isWorkProfileInQuietMode &&
                     ((isHfpDeviceAttached && shouldRingForContact) || isSelfManaged);
+        }
+
+        int ringToneType = Call.RINGTONE_SOURCE_LOCAL;
+        if (call.isCrsCall() && mCrsAudioController!= null) {
+            ringToneType = mCrsAudioController.getCrsRingToneType(call);
+            Log.i(TAG, "CRS mode : Set the ringToneType : ", ringToneType);
         }
 
         // Set missed reason according to attributes
@@ -1076,21 +1061,13 @@ public class Ringer {
                 .setShouldRingForContact(shouldRingForContact)
                 .setSilentRingingRequested(isSilentRingingRequested)
                 .setWorkProfileQuietMode(isWorkProfileInQuietMode)
+                .setRingToneType(ringToneType)
                 .build();
     }
 
     private boolean isProfileInQuietMode(UserHandle user) {
         UserManager um = mContext.getSystemService(UserManager.class);
         return um.isManagedProfile(user.getIdentifier()) && um.isQuietModeEnabled(user);
-    }
-
-    private Handler getHandler() {
-        if (mHandler == null) {
-            HandlerThread handlerThread = new HandlerThread("Ringer");
-            handlerThread.start();
-            mHandler = handlerThread.getThreadHandler();
-        }
-        return mHandler;
     }
 
     private Handler getTorchHandler() {
@@ -1103,11 +1080,7 @@ public class Ringer {
     }
 
     private Executor getLoggedExecutor(String functionName) {
-        if (mFlags.resolveHiddenDependenciesTwo()) {
-            return new LoggedExecutor(getExecutor(), functionName, null);
-        } else {
-            return new LoggedHandlerExecutor(getHandler(), functionName, null);
-        }
+        return new LoggedExecutor(getExecutor(), functionName, null);
     }
 
     public ExecutorService getExecutor() {
@@ -1139,53 +1112,20 @@ public class Ringer {
         }
     }
 
-    @Nullable
-    private static VibrationEffect loadSerializedDefaultRingVibration(
-            Resources resources, Vibrator vibrator) {
-        try {
-            InputStream vibrationInputStream =
-                    resources.openRawResource(
-                            com.android.internal.R.raw.default_ringtone_vibration_effect);
-            ParsedVibration parsedVibration = VibrationXmlParser
-                    .parseDocument(
-                            new InputStreamReader(vibrationInputStream, StandardCharsets.UTF_8));
-            if (parsedVibration == null) {
-                Log.w(TAG, "Got null parsed default ring vibration effect.");
-                return null;
-            }
-            return parsedVibration.resolve(vibrator);
-        } catch (IOException | Resources.NotFoundException e) {
-            Log.e(TAG, e, "Error parsing default ring vibration effect.");
-            return null;
-        }
-    }
-
     private static VibrationEffect loadDefaultRingVibrationEffect(
             Context context,
-            Vibrator vibrator,
             VibrationEffectProxy vibrationEffectProxy,
             FeatureFlags featureFlags) {
-        Resources resources = context.getResources();
+        Resources resources = TelecomResourceId.getResources(context);
 
-        if (resources.getBoolean(R.bool.use_simple_vibration_pattern)) {
+        if (TelecomResourceId.getBoolean(context, "use_simple_vibration_pattern")) {
             Log.i(TAG, "Using simple default ring vibration.");
             return createSimpleRingVibration(vibrationEffectProxy);
         }
 
         if (featureFlags.useDeviceProvidedSerializedRingerVibration()) {
-            VibrationEffect parsedEffect = loadSerializedDefaultRingVibration(resources, vibrator);
-            if (parsedEffect != null) {
-                Log.i(TAG, "Using parsed default ring vibration.");
-                // Make the parsed effect repeating to make it vibrate continuously during ring.
-                // If the effect is already repeating, this API call is a no-op.
-                // Otherwise, it  uses `DEFAULT_RING_VIBRATION_LOOP_DELAY_MS` when changing a
-                // non-repeating vibration to a repeating vibration.
-                // This is so that we ensure consecutive loops of the vibration play with some gap
-                // in between.
-                return parsedEffect.applyRepeatingIndefinitely(
-                        /* wantRepeating= */ true, DEFAULT_RING_VIBRATION_LOOP_DELAY_MS);
-            }
-            // Fallback to the simple vibration if the serialized effect cannot be loaded.
+            Log.i(TAG, "Device provided serialized ringer vibration is no longer supported; "
+                    + "falling back to simple default ring vibration.");
             return createSimpleRingVibration(vibrationEffectProxy);
         }
 
@@ -1299,9 +1239,8 @@ public class Ringer {
                 VibrationAttributes.createForUsage(VibrationAttributes.USAGE_ACCESSIBILITY));
     }
 
-
     public void startVibratingForOutgoingCallActive() {
-        if (!mFlags.callConnectedIndicatorPreference()) {
+        if (!android.telecom.flags.Flags.callConnectedIndicatorPreference()) {
             Log.i(TAG, "Call connected indicator of vibration is disabled.");
             return;
         }

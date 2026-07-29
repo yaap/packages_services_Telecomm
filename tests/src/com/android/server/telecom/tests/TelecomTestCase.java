@@ -26,9 +26,12 @@ import android.telecom.Log;
 
 import androidx.test.InstrumentationRegistry;
 
+import com.android.server.telecom.TelecomResourceId;
 import com.android.server.telecom.flags.FeatureFlags;
 import com.android.server.telecom.flags.FeatureFlagsImpl;
 
+import org.junit.After;
+import org.junit.Before;
 import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.MockitoAnnotations;
@@ -40,6 +43,7 @@ import java.util.function.Predicate;
 
 public abstract class TelecomTestCase {
     protected static final String TESTING_TAG = "Telecom-TEST";
+    protected static final String TELECOM_UI_PACKAGE_NAME = "com.android.server.telecomui";
     protected Context mContext;
     @Mock
     FeatureFlags mFeatureFlags;
@@ -48,6 +52,7 @@ public abstract class TelecomTestCase {
     MockitoHelper mMockitoHelper = new MockitoHelper();
     ComponentContextFixture mComponentContextFixture;
 
+    @Before
     public void setUp() throws Exception {
         Log.setTag(TESTING_TAG);
         Log.setIsExtendedLoggingEnabled(true);
@@ -55,13 +60,14 @@ public abstract class TelecomTestCase {
         mMockitoHelper.setUp(InstrumentationRegistry.getContext(), getClass());
         MockitoAnnotations.initMocks(this);
 
-        when(mFeatureFlags.voipDndFocus()).thenReturn(new FeatureFlagsImpl().voipDndFocus());
         mComponentContextFixture = new ComponentContextFixture(mFeatureFlags);
         mContext = mComponentContextFixture.getTestDouble().getApplicationContext();
         Log.setSessionManager(mComponentContextFixture.getTestDouble().getApplicationContext(),
                 null);
+        TelecomResourceId.setTelecomContext(mContext);
     }
 
+    @After
     public void tearDown() throws Exception {
         if (mHandlerThread != null) {
             mHandlerThread.quit();
@@ -72,6 +78,7 @@ public abstract class TelecomTestCase {
         mComponentContextFixture = null;
         mMockitoHelper.tearDown();
         Mockito.framework().clearInlineMocks();
+        TelecomResourceId.setTelecomContext(null);
     }
 
     protected Looper getLooper() {

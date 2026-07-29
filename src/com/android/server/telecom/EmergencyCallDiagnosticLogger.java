@@ -18,17 +18,17 @@ package com.android.server.telecom;
 
 import static android.telephony.TelephonyManager.EmergencyCallDiagnosticData;
 
+import android.annotation.SuppressLint;
 import android.os.BugreportManager;
 import android.os.DropBoxManager;
 import android.provider.DeviceConfig;
 import android.telecom.DisconnectCause;
 import android.telecom.Log;
 import android.telephony.TelephonyManager;
+import android.util.IndentingPrintWriter;
 import android.util.LocalLog;
 
 import com.android.internal.annotations.VisibleForTesting;
-import com.android.internal.telephony.flags.Flags;
-import com.android.internal.util.IndentingPrintWriter;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -50,8 +50,7 @@ public class EmergencyCallDiagnosticLogger extends CallsManagerListenerBase
         implements Call.Listener {
 
     public static final int REPORT_REASON_RANGE_START = -1; //!!DO NOT CHANGE
-    private static final int REPORT_REASON_UNKNOWN = 5;
-    public static final int REPORT_REASON_RANGE_END = 6; //increment this and add new reason above
+    public static final int REPORT_REASON_RANGE_END = 5; //increment this and add new reason above
     public static final int COLLECTION_TYPE_BUGREPORT = 10;
     public static final int COLLECTION_TYPE_TELECOM_STATE = 11;
     public static final int COLLECTION_TYPE_TELEPHONY_STATE = 12;
@@ -88,22 +87,18 @@ public class EmergencyCallDiagnosticLogger extends CallsManagerListenerBase
     private final BugreportManager mBugreportManager;
     private final Executor mAsyncTaskExecutor;
     private final ClockProxy mClockProxy;
-    private final boolean mEnableLogcatCollectionForAllEmergencyCalls;
 
     public EmergencyCallDiagnosticLogger(
             TelephonyManager tm,
             BugreportManager brm,
             Timeouts.Adapter timeoutAdapter, DropBoxManager dropBoxManager,
-            Executor asyncTaskExecutor, ClockProxy clockProxy,
-            boolean enableLogcatCollectionForAllEmergencyCalls) {
+            Executor asyncTaskExecutor, ClockProxy clockProxy) {
         mTimeoutAdapter = timeoutAdapter;
         mDropBoxManager = dropBoxManager;
         mTelephonyManager = tm;
         mBugreportManager = brm;
         mAsyncTaskExecutor = asyncTaskExecutor;
         mClockProxy = clockProxy;
-        mEnableLogcatCollectionForAllEmergencyCalls =
-                enableLogcatCollectionForAllEmergencyCalls;
     }
 
     // this calculates time from ACTIVE --> removed
@@ -131,30 +126,16 @@ public class EmergencyCallDiagnosticLogger extends CallsManagerListenerBase
     public static List<Integer> getDataCollectionTypes(int reason) {
         switch (reason) {
             case REPORT_REASON_SHORT_DURATION_AFTER_GOING_ACTIVE:
-                if (Flags.enableOemLogSourcesCollection()) {
-                    return Arrays.asList(COLLECTION_TYPE_TELECOM_STATE,
-                            COLLECTION_TYPE_LOGCAT_BUFFERS);
-                }
                 return Arrays.asList(COLLECTION_TYPE_TELECOM_STATE);
             case REPORT_REASON_CALL_CREATED_BUT_NEVER_ADDED:
-                if (Flags.enableOemLogSourcesCollection()) {
-                    return Arrays.asList(
-                            COLLECTION_TYPE_TELECOM_STATE,
-                            COLLECTION_TYPE_TELEPHONY_STATE,
-                            COLLECTION_TYPE_LOGCAT_BUFFERS);
-                }
                 return Arrays.asList(
-                        COLLECTION_TYPE_TELECOM_STATE,
-                        COLLECTION_TYPE_TELEPHONY_STATE);
+                        COLLECTION_TYPE_TELECOM_STATE, COLLECTION_TYPE_TELEPHONY_STATE);
             case REPORT_REASON_CALL_FAILED:
             case REPORT_REASON_INACTIVE_CALL_TERMINATED_BY_USER_AFTER_DELAY:
             case REPORT_REASON_STUCK_CALL_DETECTED:
                 return Arrays.asList(
                         COLLECTION_TYPE_TELECOM_STATE,
                         COLLECTION_TYPE_TELEPHONY_STATE,
-                        COLLECTION_TYPE_LOGCAT_BUFFERS);
-            case REPORT_REASON_UNKNOWN:
-                return Arrays.asList(
                         COLLECTION_TYPE_LOGCAT_BUFFERS);
             default:
         }
@@ -171,6 +152,10 @@ public class EmergencyCallDiagnosticLogger extends CallsManagerListenerBase
         return mEmergencyCallsMap;
     }
 
+    /* TODO: b/478043076 - Remove SuppressLint once the API is finalized.
+     * And update the SDK check to the final version number.
+     */
+    @SuppressLint("NewApi")
     private void triggerDiagnosticsCollection(Call call, int reason) {
         Log.i(this, "Triggering diagnostics for call %s reason: %d", call.getId(), reason);
         List<Integer> dataCollectionTypes = getDataCollectionTypes(reason);
@@ -331,7 +316,6 @@ public class EmergencyCallDiagnosticLogger extends CallsManagerListenerBase
                 // call connected but did not go on for long
                 triggerDiagnosticsCollection(
                         removedCall, REPORT_REASON_SHORT_DURATION_AFTER_GOING_ACTIVE);
-                return;
             }
         } else {
 
@@ -342,17 +326,10 @@ public class EmergencyCallDiagnosticLogger extends CallsManagerListenerBase
                 // call was disconnected by the user (but not immediately)
                 triggerDiagnosticsCollection(
                         removedCall, REPORT_REASON_INACTIVE_CALL_TERMINATED_BY_USER_AFTER_DELAY);
-                return;
             } else if (dc != DisconnectCause.LOCAL) {
                 // this can be a case for a full bugreport
                 triggerDiagnosticsCollection(removedCall, REPORT_REASON_CALL_FAILED);
-                return;
             }
-        }
-
-        if (mEnableLogcatCollectionForAllEmergencyCalls &&
-                Flags.enableOemLogSourcesCollection()) {
-            triggerDiagnosticsCollection(removedCall, REPORT_REASON_UNKNOWN);
         }
     }
 

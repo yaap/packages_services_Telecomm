@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Copyright (C) 2025 The Android Open Source Project
+
+     Licensed under the Apache License, Version 2.0 (the "License");
+     you may not use this file except in compliance with the License.
+     You may obtain a copy of the License at
+
+          http://www.apache.org/licenses/LICENSE-2.0
+
+     Unless required by applicable law or agreed to in writing, software
+     distributed under the License is distributed on an "AS IS" BASIS,
+     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+     See the License for the specific language governing permissions and
+     limitations under the License.
+-->
+
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:androidprv="http://schemas.android.com/apk/prv/res/android"
+    package="com.android.server.telecomui"
+    coreApp="true">
+
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+    <uses-permission android:name="android.permission.CALL_PRIVILEGED" />
+    <uses-permission android:name="android.permission.INTERACT_ACROSS_USERS" />
+    <uses-permission android:name="android.permission.MODIFY_PHONE_STATE" />
+    <uses-permission android:name="android.permission.STOP_APP_SWITCHES" />
+    <uses-permission android:name="android.permission.SUBSTITUTE_NOTIFICATION_APP_NAME" />
+    <uses-permission android:name="android.permission.READ_BLOCKED_NUMBERS" />
+    <uses-permission android:name="android.permission.WRITE_BLOCKED_NUMBERS"/>
+
+    <permission android:name="com.android.telephonycore.permission.TELECOM_UI_ACCESS"
+        android:protectionLevel="signature|privileged" />
+    <uses-permission android:name="com.android.telephonycore.permission.TELECOM_UI_ACCESS" />
+
+    <application
+        android:usesCleartextTraffic="false"
+        android:enabled="false"
+        android:supportsRtl="true"
+        android:directBootAware="true">
+
+        <!-- CALL vs CALL_PRIVILEGED vs CALL_EMERGENCY
+             We have three different intents through which a call can be initiated each with its
+             own behavior.
+             1) CALL - Expected from any third party app with CALL_PHONE permission. Through this
+             intent, an app can call any number except emergency numbers.
+             2) CALL_PRIVILEGED - Expected from the dialer app and requires CALL_PRIVILEGED
+             permission, which is only held by the system dialer and the emergency dialer at the
+             time of this writing. Through this intent, an app can call any number including
+             emergency numbers.
+             3) CALL_EMERGENCY - Expected from the emergency dialer app and requires CALL_PRIVILEGED
+             permission. Through this intent, an app can call *only* emergency numbers. -->
+
+        <!-- This activity is exported and for the carrier to use. -->
+        <activity android:name=".settings.BlockedNumbersActivity"
+            android:label="@string/blocked_numbers"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:theme="@style/Theme.Telecom.BlockedNumbers"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.telecom.action.MANAGE_BLOCKED_NUMBERS"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+            </intent-filter>
+        </activity>
+
+        <activity android:name=".settings.CallBlockDisabledActivity"
+            android:configChanges="keyboardHidden|orientation|screenSize"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance"
+            android:theme="@style/Theme.Telecomm.Transparent"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.telecom.action.SHOW_CALL_BLOCK_DISABLED_DIALOG"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+            </intent-filter>
+        </activity>
+
+        <activity android:name=".RespondViaSmsSettings"
+            android:label="@string/respond_via_sms_setting_title"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:theme="@style/CallSettingsWithoutDividerTheme"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <action android:name="android.telecom.action.SHOW_RESPOND_VIA_SMS_SETTINGS"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+            </intent-filter>
+        </activity>
+
+        <activity android:name=".settings.EnableAccountPreferenceActivity"
+            android:label="@string/enable_account_preference_title"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:theme="@style/Theme.Telecom.EnableAccount"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+            </intent-filter>
+        </activity>
+
+        <activity android:name=".components.ErrorDialogActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance"
+            android:theme="@style/Theme.Telecomm.Transparent">
+        </activity>
+
+        <activity android:name=".ui.ConfirmCallDialogActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance"
+            android:theme="@style/Theme.Telecomm.Transparent">
+        </activity>
+
+        <activity android:name=".ui.CallRedirectionTimeoutDialogActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance"
+            android:theme="@style/Theme.Telecomm.Transparent">
+        </activity>
+
+        <activity android:name=".components.UserCallActivity"
+            android:theme="@style/Theme.Telecomm.Transparent"
+            android:permission="android.permission.CALL_PHONE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.android.internal.telecom.action.CALL_TRAMPOLINE"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+            </intent-filter>
+        </activity>
+
+    </application>
+</manifest>

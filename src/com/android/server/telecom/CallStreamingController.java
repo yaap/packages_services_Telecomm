@@ -215,13 +215,8 @@ public class CallStreamingController extends CallsManagerListenerBase {
             Intent serviceIntent = new Intent(CallStreamingService.SERVICE_INTERFACE);
             serviceIntent.setPackage(holders.get(0));
             List<ResolveInfo> infos;
-            if (Flags.resolveHiddenDependenciesTwo()) {
-                infos = UserUtil.getPackageManagerFromUserHandler(mContext, mUserHandle).
-                        queryIntentServices(serviceIntent, PackageManager.GET_META_DATA);
-            } else {
-                infos = packageManager.queryIntentServicesAsUser(serviceIntent,
-                        PackageManager.GET_META_DATA, mUserHandle);
-            }
+            infos = UserUtil.getPackageManagerFromUserHandler(mContext, mUserHandle)
+                    .queryIntentServices(serviceIntent, PackageManager.GET_META_DATA);
             if (infos.isEmpty()) {
                 Log.w(this, "processTransaction: Can't find streaming service");
                 future.complete(new CallTransactionResult(
@@ -242,12 +237,12 @@ public class CallStreamingController extends CallsManagerListenerBase {
                 return future;
             }
             Intent intent = new Intent(CallStreamingService.SERVICE_INTERFACE);
-            intent.setComponent(serviceInfo.getComponentName());
+            intent.setComponent(new ComponentName(serviceInfo.packageName, serviceInfo.name));
 
             mConnection = new CallStreamingServiceConnection(mCall, mWrapper, future);
             if (!mContext.bindServiceAsUser(intent, mConnection, Context.BIND_AUTO_CREATE
                     | Context.BIND_FOREGROUND_SERVICE
-                    | Context.BIND_SCHEDULE_LIKE_TOP_APP, mUserHandle)) {
+                    | Constants.BIND_SCHEDULE_LIKE_TOP_APP, mUserHandle)) {
                 Log.w(this, "Can't bind to streaming service");
                 future.complete(new CallTransactionResult(
                         CallException.CODE_ERROR_UNKNOWN /* TODO:: define error b/335703584 */,
@@ -374,9 +369,9 @@ public class CallStreamingController extends CallsManagerListenerBase {
     }
 
     private class CallStreamingStateChangeTransaction extends CallTransaction {
-        @StreamingCall.StreamingCallState int mState;
+        /*@StreamingCall.StreamingCallState*/ int mState;
 
-        public CallStreamingStateChangeTransaction(@StreamingCall.StreamingCallState int state) {
+        public CallStreamingStateChangeTransaction(/*@StreamingCall.StreamingCallState*/ int state) {
             super(mTelecomLock);
             mState = state;
         }

@@ -22,13 +22,14 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.UserManager;
-import android.provider.BlockedNumberContract;
 import android.provider.CallLog;
 import android.telecom.Log;
 import android.telecom.TelecomManager;
 
+import com.android.internal.telecom.flags.Flags;
 import com.android.server.telecom.Call;
 import com.android.server.telecom.CallerInfoLookupHelper;
+import com.android.server.telecom.Constants;
 import com.android.server.telecom.flags.FeatureFlags;
 import com.android.server.telecom.LogUtils;
 import com.android.server.telecom.LoggedHandlerExecutor;
@@ -126,15 +127,22 @@ public class BlockCheckerFilter extends CallFilter {
         CompletableFuture<CallFilteringResult> resultFuture = new CompletableFuture<>();
         Bundle extras = new Bundle();
         final Context userContext;
-        if (mFeatureFlags.telecomMainUserInBlockCheck()) {
-            userContext = mContext.createContextAsUser(mCall.getAssociatedUser(), 0);
+
+        if (Flags.getMainUserForBlockChecker()) {
+            UserManager userManager = mContext.getSystemService(UserManager.class);
+            // UserManager#getMainUser requires either the MANAGE_USERS,
+            // CREATE_USERS, or QUERY_USERS permission.
+            if (userManager != null && userManager.getMainUser() != null) {
+                userContext = mContext.createContextAsUser(userManager.getMainUser(), 0);
+            } else {
+                userContext = mContext;
+            }
         } else {
-            userContext = mContext;
+            userContext = mContext.createContextAsUser(mCall.getAssociatedUser(), 0);
         }
-        if (BlockedNumbersUtil.isEnhancedCallBlockingEnabledByPlatform(userContext,
-                mFeatureFlags)) {
+        if (BlockedNumbersUtil.isEnhancedCallBlockingEnabledByPlatform(userContext)) {
             int presentation = mCall.getHandlePresentation();
-            extras.putInt(BlockedNumberContract.EXTRA_CALL_PRESENTATION, presentation);
+            extras.putInt(Constants.EXTRA_CALL_PRESENTATION, presentation);
             if (presentation == TelecomManager.PRESENTATION_ALLOWED) {
                 mCallerInfoLookupHelper.startLookup(mCall.getHandle(),
                         new CallerInfoLookupHelper.OnQueryCompleteListener() {
@@ -167,8 +175,7 @@ public class BlockCheckerFilter extends CallFilter {
         // exist in the extras to maintain existing behavior.
         int presentation;
         boolean isNumberInContacts;
-        if (BlockedNumbersUtil.isEnhancedCallBlockingEnabledByPlatform(userContext,
-                mFeatureFlags)) {
+        if (BlockedNumbersUtil.isEnhancedCallBlockingEnabledByPlatform(userContext)) {
             presentation = mCall.getHandlePresentation();
         } else {
             presentation = 0;

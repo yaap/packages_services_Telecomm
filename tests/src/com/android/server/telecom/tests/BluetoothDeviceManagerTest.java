@@ -51,6 +51,7 @@ import android.util.Pair;
 
 import androidx.test.filters.SmallTest;
 
+import com.android.dx.mockito.inline.extended.ExtendedMockito;
 import com.android.server.telecom.AudioRoute;
 import com.android.server.telecom.CallAudioRouteController;
 import com.android.server.telecom.PendingAudioRoute;
@@ -65,6 +66,8 @@ import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
+import org.mockito.MockitoSession;
+import org.mockito.quality.Strictness;
 
 import static org.mockito.Mockito.reset;
 import java.util.ArrayList;
@@ -93,6 +96,7 @@ public class BluetoothDeviceManagerTest extends TelecomTestCase {
     BluetoothProfile.ServiceListener serviceListenerUnderTest;
     BluetoothStateReceiver receiverUnderTest;
     ArgumentCaptor<BluetoothLeAudio.Callback> leAudioCallbacksTest;
+    private MockitoSession mMockitoSession;
 
     private BluetoothDevice device1;
     private BluetoothDevice device2;
@@ -105,6 +109,13 @@ public class BluetoothDeviceManagerTest extends TelecomTestCase {
     @Before
     public void setUp() throws Exception {
         super.setUp();
+        mMockitoSession = ExtendedMockito.mockitoSession()
+                .strictness(Strictness.LENIENT)
+                .mockStatic(com.android.internal.telecom.flags.Flags.class)
+                .startMocking();
+        ExtendedMockito.when(com.android.internal.telecom.flags.Flags.callAudioRouteRf())
+                .thenReturn(false);
+
         device1 = makeBluetoothDevice("00:00:00:00:00:01");
         // hearing aid
         device2 = makeBluetoothDevice("00:00:00:00:00:02");
@@ -134,7 +145,7 @@ public class BluetoothDeviceManagerTest extends TelecomTestCase {
                 serviceCaptor.capture(), eq(BluetoothProfile.HEADSET));
         serviceListenerUnderTest = serviceCaptor.getValue();
 
-        receiverUnderTest = new BluetoothStateReceiver(mBluetoothDeviceManager, mFeatureFlags);
+        receiverUnderTest = new BluetoothStateReceiver(mContext, mBluetoothDeviceManager);
         receiverUnderTest.setCallAudioRouteAdapter(mCallAudioRouteController);
 
         mBluetoothDeviceManager.setHeadsetServiceForTesting(mBluetoothHeadset);
@@ -146,12 +157,14 @@ public class BluetoothDeviceManagerTest extends TelecomTestCase {
         verify(mBluetoothLeAudio).registerCallback(any(), leAudioCallbacksTest.capture());
 
         when(mSpeakerInfo.getType()).thenReturn(TYPE_BUILTIN_SPEAKER);
-        when(mFeatureFlags.keepBluetoothDevicesCacheUpdated()).thenReturn(true);
     }
 
     @Override
     @After
     public void tearDown() throws Exception {
+        if (mMockitoSession != null) {
+            mMockitoSession.finishMocking();
+        }
         super.tearDown();
     }
 
@@ -318,6 +331,29 @@ public class BluetoothDeviceManagerTest extends TelecomTestCase {
 
         verify(mCallAudioRouteController).sendMessageWithSessionInfo(SWITCH_BASELINE_ROUTE,
                 INCLUDE_BLUETOOTH_IN_BASELINE, (String) null);
+    }
+
+    @SmallTest
+    @Test
+    public void testBluetoothStateOff() {
+        receiverUnderTest.onReceive(mContext,
+                buildConnectionActionIntent(BluetoothHeadset.STATE_CONNECTED, device1,
+                        BluetoothDeviceManager.DEVICE_TYPE_HEADSET));
+        receiverUnderTest.onReceive(mContext,
+                buildConnectionActionIntent(BluetoothHeadset.STATE_CONNECTED, device2,
+                        BluetoothDeviceManager.DEVICE_TYPE_HEARING_AID));
+        receiverUnderTest.onReceive(mContext,
+                buildConnectionActionIntent(BluetoothHeadset.STATE_CONNECTED, device5,
+                        BluetoothDeviceManager.DEVICE_TYPE_LE_AUDIO));
+        leAudioCallbacksTest.getValue().onGroupNodeAdded(device5, 1);
+        when(mBluetoothLeAudio.getGroupId(device5)).thenReturn(1);
+        when(mBluetoothLeAudio.getConnectedGroupLeadDevice(1)).thenReturn(device5);
+
+        Intent stateChangeIntent = new Intent(BluetoothAdapter.ACTION_STATE_CHANGED);
+        stateChangeIntent.putExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.STATE_OFF);
+        receiverUnderTest.onReceive(mContext, stateChangeIntent);
+
+        assertEquals(0, mBluetoothDeviceManager.getNumConnectedDevices());
     }
 
     @SmallTest
@@ -736,24 +772,8 @@ public class BluetoothDeviceManagerTest extends TelecomTestCase {
 
     @SmallTest
     @Test
-    public void testRegisterLeAudioCallbackNoPostpone() {
-        reset(mBluetoothLeAudio);
-        when(mFeatureFlags.postponeRegisterToLeaudio()).thenReturn(false);
-        serviceListenerUnderTest.onServiceConnected(BluetoothProfile.LE_AUDIO,
-                        (BluetoothProfile) mBluetoothLeAudio);
-        // Second time on purpose
-        serviceListenerUnderTest.onServiceConnected(BluetoothProfile.LE_AUDIO,
-                        (BluetoothProfile) mBluetoothLeAudio);
-        verify(mExecutor, times(0)).execute(any());
-        verify(mBluetoothLeAudio, times(1)).registerCallback(any(Executor.class),
-                        any(BluetoothLeAudio.Callback.class));
-    }
-
-    @SmallTest
-    @Test
     public void testRegisterLeAudioCallbackWithPostpone() {
         reset(mBluetoothLeAudio);
-        when(mFeatureFlags.postponeRegisterToLeaudio()).thenReturn(true);
         serviceListenerUnderTest.onServiceConnected(BluetoothProfile.LE_AUDIO,
                         (BluetoothProfile) mBluetoothLeAudio);
         verify(mExecutor, times(1)).execute(any());

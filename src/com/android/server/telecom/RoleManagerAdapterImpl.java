@@ -23,8 +23,7 @@ import android.content.pm.PackageManager;
 import android.os.Binder;
 import android.os.UserHandle;
 import android.telecom.Log;
-
-import com.android.internal.util.IndentingPrintWriter;
+import android.util.IndentingPrintWriter;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -96,7 +95,7 @@ public class RoleManagerAdapterImpl implements RoleManagerAdapter {
         if (mOverrideDefaultDialerApp != null) {
             return mOverrideDefaultDialerApp;
         }
-        return getRoleManagerDefaultDialerApp(new UserHandle(user));
+        return getRoleManagerDefaultDialerApp(UserHandle.of(user));
     }
 
     @Override
@@ -175,7 +174,7 @@ public class RoleManagerAdapterImpl implements RoleManagerAdapter {
     }
 
     private String[] getBluetoothInCallServicePackageName() {
-        return mContext.getResources().getStringArray(R.array.system_bluetooth_stack_package_name);
+        return TelecomResourceId.getStringArray(mContext, "system_bluetooth_stack_package_name");
     }
 
     /**

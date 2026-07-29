@@ -1,14 +1,6 @@
 package: "com.android.server.telecom.flags"
 container: "system"
 
-# OWNER=qingzhong TARGET=24Q2
-flag {
-  name: "early_binding_to_incall_service"
-  namespace: "telecom"
-  description: "Binds to InCallServices when call requires no call filtering on watch"
-  bug: "282113261"
-}
-
 # OWNER=tjstuart TARGET=24Q4
 flag {
   name: "do_not_send_call_to_null_ics"
@@ -17,12 +9,23 @@ flag {
   bug: "345473659"
 }
 
-# OWNER=sungcheol TARGET=25Q4
+# OWNER=arunrajms TARGET=26Q2
 flag {
-  name: "enable_incall_service_class_check"
+   name: "bulk_state_update_call"
+   namespace: "telecom"
+   description: "Improving Phone App KPI by optimizing the InCall updates to Bulk mode"
+   bug: "428702212"
+   metadata {
+        purpose: PURPOSE_FEATURE
+   }
+}
+
+# OWNER=huiwang TARGET=26Q1
+flag {
+  name: "notify_available_endpoints_on_ics_connected"
   namespace: "telecom"
-  description: "Flag for supporting IncallService API"
-  bug: "414464423"
+  description: "Notify onAvailableCallEndpointsChanged on ICS connected"
+  bug: "448784549"
   metadata {
       purpose: PURPOSE_BUGFIX
   }

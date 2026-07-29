@@ -19,6 +19,7 @@ package com.android.server.telecom.tests;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -30,6 +31,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import android.bluetooth.BluetoothDevice;
+import android.content.res.Resources;
 import android.os.ResultReceiver;
 import android.telecom.CallAudioState;
 import android.telecom.CallEndpoint;
@@ -40,7 +42,16 @@ import com.android.server.telecom.CallAudioManager;
 import com.android.server.telecom.CallEndpointController;
 import com.android.server.telecom.CallsManager;
 import com.android.server.telecom.ConnectionServiceWrapper;
+import com.android.server.telecom.TelecomResourceId;
 import com.android.server.telecom.flags.FeatureFlags;
+import com.android.server.telecom.metrics.ApiStats;
+import com.android.server.telecom.metrics.AudioRouteStats;
+import com.android.server.telecom.metrics.CallEndpointStats;
+import com.android.server.telecom.metrics.CallSequencingStats;
+import com.android.server.telecom.metrics.CallStats;
+import com.android.server.telecom.metrics.ErrorStats;
+import com.android.server.telecom.metrics.EventStats;
+import com.android.server.telecom.metrics.TelecomMetricsController;
 
 import org.junit.Before;
 import org.junit.After;
@@ -91,16 +102,37 @@ public class CallEndpointControllerTest extends TelecomTestCase {
     private CallEndpointController mCallEndpointController;
 
     @Mock private CallsManager mCallsManager;
+    @Mock private TelecomMetricsController mMockTelecomMetricsController;
+    @Mock private ApiStats mApiStats;
+    @Mock private AudioRouteStats mAudioRouteStats;
+    @Mock private CallStats mCallStats;
+    @Mock private ErrorStats mErrorStats;
+    @Mock private EventStats mEventStats;
+    @Mock private CallSequencingStats mCallSequencingStats;
+    @Mock private CallEndpointStats mCallEndpointStats;
     @Mock private Call mCall;
     @Mock private ConnectionServiceWrapper mConnectionService;
     @Mock private CallAudioManager mCallAudioManager;
     @Mock private MockContext mMockContext;
+    @Mock private Resources mResources;
     @Mock private ResultReceiver mResultReceiver;
 
     @Override
     @Before
     public void setUp() throws Exception {
         super.setUp();
+        when(mMockContext.getResources()).thenReturn(mResources);
+        TelecomResourceId.setTelecomContext(mMockContext);
+        when(mMockTelecomMetricsController.getApiStats()).thenReturn(mApiStats);
+        when(mMockTelecomMetricsController.getAudioRouteStats()).thenReturn(mAudioRouteStats);
+        when(mMockTelecomMetricsController.getCallStats()).thenReturn(mCallStats);
+        when(mMockTelecomMetricsController.getErrorStats()).thenReturn(mErrorStats);
+        when(mMockTelecomMetricsController.getEventStats()).thenReturn(mEventStats);
+        when(mMockTelecomMetricsController.getCallSequencingStats()).thenReturn(
+                mCallSequencingStats);
+        when(mMockTelecomMetricsController.getCallEndpointStats()).thenReturn(
+                mCallEndpointStats);
+        when(mCallsManager.getMetricsController()).thenReturn(mMockTelecomMetricsController);
         mCallEndpointController = new CallEndpointController(
                 mMockContext,
                 mCallsManager,
@@ -121,6 +153,7 @@ public class CallEndpointControllerTest extends TelecomTestCase {
     @Override
     @After
     public void tearDown() throws Exception {
+        TelecomResourceId.setTelecomContext(null);
         super.tearDown();
     }
 
@@ -363,5 +396,56 @@ public class CallEndpointControllerTest extends TelecomTestCase {
         verify(mCallAudioManager, never()).setAudioRoute(eq(CallAudioState.ROUTE_BLUETOOTH),
                 eq(bluetoothDevice1.getAddress()));
         verify(mResultReceiver).send(eq(CallEndpoint.ENDPOINT_OPERATION_FAILED), any());
+    }
+
+    @Test
+    public void testFindMatchingRouteEndpoint_SuccessEarpiece() {
+        // Setup: Initialize with a state that supports all routes (Earpiece, Speaker, BT, etc).
+        mCallEndpointController.onCallAudioStateChanged(null, audioState1);
+
+        // Scenario 1: Find an existing endpoint (Earpiece).
+        CallEndpoint earpieceEndpoint = mCallEndpointController.findMatchingRouteEndpoint(
+                CallAudioState.ROUTE_EARPIECE);
+
+        assertNotNull(earpieceEndpoint);
+        assertEquals(CallEndpoint.TYPE_EARPIECE, earpieceEndpoint.getEndpointType());
+    }
+
+    @Test
+    public void testFindMatchingRouteEndpoint_SuccessSpeaker() {
+        // Setup: Initialize with a state that supports all routes (Earpiece, Speaker, BT, etc).
+        mCallEndpointController.onCallAudioStateChanged(null, audioState1);
+
+        // Scenario 2: Find another existing endpoint (Speaker).
+        CallEndpoint speakerEndpoint = mCallEndpointController.findMatchingRouteEndpoint(
+                CallAudioState.ROUTE_SPEAKER);
+
+        assertNotNull(speakerEndpoint);
+        assertEquals(CallEndpoint.TYPE_SPEAKER, speakerEndpoint.getEndpointType());
+    }
+
+    @Test
+    public void testFindMatchingRouteEndpoint_FailUnavailable() {
+        // Scenario 3: Try to find an endpoint that is not available.
+        // Setup: Change the state to one that only supports Earpiece.
+        mCallEndpointController.onCallAudioStateChanged(null, audioState6);
+
+        CallEndpoint nonExistentSpeaker = mCallEndpointController.findMatchingRouteEndpoint(
+                CallAudioState.ROUTE_SPEAKER);
+
+        assertNull(nonExistentSpeaker);
+    }
+
+    @Test
+    public void testFindMatchingRouteEndpoint_FailEmptyList() {
+        // Scenario 4: Try to find an endpoint when the available list is empty.
+        // Setup: The STREAMING-only state results in an empty available endpoint list.
+        mCallEndpointController.onCallAudioStateChanged(null, audioState7);
+        assertTrue(mCallEndpointController.getAvailableEndpoints().isEmpty());
+
+        CallEndpoint nonExistentEarpiece = mCallEndpointController.findMatchingRouteEndpoint(
+                CallAudioState.ROUTE_EARPIECE);
+
+        assertNull(nonExistentEarpiece);
     }
 }

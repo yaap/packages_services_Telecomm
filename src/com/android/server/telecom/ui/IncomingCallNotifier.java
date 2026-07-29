@@ -37,10 +37,9 @@ import com.android.server.telecom.Call;
 import com.android.server.telecom.CallState;
 import com.android.server.telecom.CallsManagerListenerBase;
 import com.android.server.telecom.HandoverState;
-import com.android.server.telecom.R;
 import com.android.server.telecom.TelecomBroadcastIntentProcessor;
+import com.android.server.telecom.TelecomResourceId;
 import com.android.server.telecom.UserUtil;
-import com.android.server.telecom.components.TelecomBroadcastReceiver;
 import com.android.server.telecom.flags.FeatureFlags;
 
 import java.util.Objects;
@@ -180,13 +179,13 @@ public class IncomingCallNotifier extends CallsManagerListenerBase {
         Notification.Builder builder = getNotificationBuilder(call,
                 mCallsManagerProxy.getActiveCall());
         UserUtil.processNotification(mContext, call.getAssociatedUser(), NOTIFICATION_TAG,
-                NOTIFICATION_INCOMING_CALL, builder.build(), mFeatureFlags);
+                NOTIFICATION_INCOMING_CALL, builder.build());
     }
 
     private void hideIncomingCallNotification(UserHandle userHandle) {
         Log.i(this, "hideIncomingCallNotification for user = %s", userHandle);
         UserUtil.processNotification(mContext, userHandle, NOTIFICATION_TAG,
-                NOTIFICATION_INCOMING_CALL, null /* notification */, mFeatureFlags);
+                NOTIFICATION_INCOMING_CALL, null /* notification */);
     }
 
     private String getNotificationName(Call call) {
@@ -209,20 +208,15 @@ public class IncomingCallNotifier extends CallsManagerListenerBase {
         // from the phone app's name.
         Bundle extras = new Bundle();
 
-        if (mFeatureFlags.resolveHiddenDependenciesTwo()) {
-            extras.putString(Notification.EXTRA_SUBSTITUTE_APP_NAME, mContext.getString(
-                    com.android.server.telecom.R.string.android_system_label));
-        } else {
-            extras.putString(Notification.EXTRA_SUBSTITUTE_APP_NAME, mContext.getString(
-                    com.android.internal.R.string.android_system_label));
-        }
+        extras.putString(Notification.EXTRA_SUBSTITUTE_APP_NAME,
+                TelecomResourceId.getString(mContext, "android_system_label"));
 
         Intent answerIntent = new Intent(
-                TelecomBroadcastIntentProcessor.ACTION_ANSWER_FROM_NOTIFICATION, null, mContext,
-                TelecomBroadcastReceiver.class);
+                TelecomBroadcastIntentProcessor.ACTION_ANSWER_FROM_NOTIFICATION);
+        answerIntent.setPackage(mContext.getPackageName());
         Intent rejectIntent = new Intent(
-                TelecomBroadcastIntentProcessor.ACTION_REJECT_FROM_NOTIFICATION, null, mContext,
-                TelecomBroadcastReceiver.class);
+                TelecomBroadcastIntentProcessor.ACTION_REJECT_FROM_NOTIFICATION);
+        rejectIntent.setPackage(mContext.getPackageName());
 
         String nameOrNumber = getNotificationName(incomingCall);
         CharSequence viaApp = incomingCall.getTargetPhoneAccountLabel();
@@ -236,11 +230,11 @@ public class IncomingCallNotifier extends CallsManagerListenerBase {
         // Build the "IncomingApp call from John Smith" message.
         CharSequence incomingCallText;
         if (isIncomingVideo) {
-            incomingCallText = mContext.getString(R.string.notification_incoming_video_call, viaApp,
-                    nameOrNumber);
+            incomingCallText = TelecomResourceId.getString(mContext,
+                    "notification_incoming_video_call", viaApp, nameOrNumber);
         } else {
-            incomingCallText = mContext.getString(R.string.notification_incoming_call, viaApp,
-                    nameOrNumber);
+            incomingCallText = TelecomResourceId.getString(mContext,
+                    "notification_incoming_call", viaApp, nameOrNumber);
         }
 
         // Build the "Answering will end your OtherApp call" line.
@@ -252,13 +246,14 @@ public class IncomingCallNotifier extends CallsManagerListenerBase {
             if (numOtherCalls > 1) {
                 // Multiple ongoing calls in the other app, so don't bother specifing whether it is
                 // a video call or audio call.
-                disconnectText = mContext.getString(R.string.answering_ends_other_calls,
-                        ongoingApp);
+                disconnectText = TelecomResourceId.getString(mContext,
+                        "answering_ends_other_calls", ongoingApp);
             } else if (isOngoingVideo) {
-                disconnectText = mContext.getString(R.string.answering_ends_other_video_call,
-                        ongoingApp);
+                disconnectText = TelecomResourceId.getString(mContext,
+                        "answering_ends_other_video_call", ongoingApp);
             } else {
-                disconnectText = mContext.getString(R.string.answering_ends_other_call, ongoingApp);
+                disconnectText = TelecomResourceId.getString(mContext,
+                        "answering_ends_other_call", ongoingApp);
             }
         } else {
             // For an ongoing managed call, we use a message like:
@@ -266,12 +261,14 @@ public class IncomingCallNotifier extends CallsManagerListenerBase {
             if (numOtherCalls > 1) {
                 // Multiple ongoing manage calls, so don't bother specifing whether it is a video
                 // call or audio call.
-                disconnectText = mContext.getString(R.string.answering_ends_other_managed_calls);
+                disconnectText = TelecomResourceId.getString(mContext,
+                        "answering_ends_other_managed_calls");
             } else if (isOngoingVideo) {
-                disconnectText = mContext.getString(
-                        R.string.answering_ends_other_managed_video_call);
+                disconnectText = TelecomResourceId.getString(mContext,
+                        "answering_ends_other_managed_video_call");
             } else {
-                disconnectText = mContext.getString(R.string.answering_ends_other_managed_call);
+                disconnectText = TelecomResourceId.getString(mContext,
+                        "answering_ends_other_managed_call");
             }
         }
 
@@ -282,34 +279,35 @@ public class IncomingCallNotifier extends CallsManagerListenerBase {
         builder.setCategory(Notification.CATEGORY_CALL);
         builder.setContentTitle(incomingCallText);
         builder.setContentText(disconnectText);
-        builder.setSmallIcon(R.drawable.ic_phone);
+        builder.setSmallIcon(TelecomResourceId.getIdentifier(mContext, "ic_phone", "drawable"));
         builder.setChannelId(NotificationChannelManager.CHANNEL_ID_INCOMING_CALLS);
         // Ensures this is a heads up notification.  A heads-up notification is typically only shown
         // if there is a fullscreen intent.  However since this notification doesn't have that we
         // will use this trick to get it to show as one anyways.
         builder.setVibrate(new long[0]);
-        builder.setColor(mContext.getResources().getColor(R.color.theme_color));
+        builder.setColor(TelecomResourceId.getColor(mContext, "theme_color"));
         builder.addAction(
-                R.anim.on_going_call,
-                getActionText(R.string.answer_incoming_call, R.color.notification_action_answer),
+                TelecomResourceId.getIdentifier(mContext, "on_going_call", "anim"),
+                getActionText("answer_incoming_call", "notification_action_answer"),
                 PendingIntent.getBroadcast(mContext, 0, answerIntent,
                         PendingIntent.FLAG_CANCEL_CURRENT | PendingIntent.FLAG_IMMUTABLE));
         builder.addAction(
-                R.drawable.ic_close_dk,
-                getActionText(R.string.decline_incoming_call, R.color.notification_action_decline),
-                PendingIntent.getBroadcast(mContext, 0, rejectIntent,
+                TelecomResourceId.getIdentifier(mContext, "ic_close_dk", "drawable"),
+                getActionText("decline_incoming_call", "notification_action_decline"),
+                        PendingIntent.getBroadcast(mContext, 0, rejectIntent,
                         PendingIntent.FLAG_CANCEL_CURRENT | PendingIntent.FLAG_IMMUTABLE));
         return builder;
     }
 
-    private CharSequence getActionText(int stringRes, int colorRes) {
-        CharSequence string = mContext.getText(stringRes);
+    private CharSequence getActionText(String stringResName, String colorResName) {
+        CharSequence string = TelecomResourceId.getText(mContext, stringResName);
         if (string == null) {
             return "";
         }
         Spannable spannable = new SpannableString(string);
         spannable.setSpan(
-                    new ForegroundColorSpan(mContext.getColor(colorRes)), 0, spannable.length(), 0);
+                    new ForegroundColorSpan(TelecomResourceId.getColor(mContext, colorResName)), 0,
+                    spannable.length(), 0);
         return spannable;
     }
 }

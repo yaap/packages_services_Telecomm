@@ -52,6 +52,7 @@ import android.os.PersistableBundle;
 import android.os.Process;
 import android.os.UserHandle;
 import android.os.UserManager;
+import android.platform.test.flag.junit.SetFlagsRule;
 import android.telecom.Log;
 import android.telecom.PhoneAccount;
 import android.telecom.PhoneAccountHandle;
@@ -69,6 +70,7 @@ import com.android.internal.telecom.IConnectionService;
 import com.android.internal.telephony.flags.FeatureFlags;
 import com.android.internal.util.FastXmlSerializer;
 import com.android.server.telecom.AppLabelProxy;
+import com.android.server.telecom.AnomalyReporterAdapter;
 import com.android.server.telecom.DefaultDialerCache;
 import com.android.server.telecom.PhoneAccountRegistrar;
 import com.android.server.telecom.PhoneAccountRegistrar.DefaultPhoneAccountHandle;
@@ -76,6 +78,7 @@ import com.android.server.telecom.TelecomSystem;
 
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -92,6 +95,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -104,6 +108,9 @@ import java.util.UUID;
 
 @RunWith(JUnit4.class)
 public class PhoneAccountRegistrarTest extends TelecomTestCase {
+
+    @Rule
+    public final SetFlagsRule mSetFlagsRule = new SetFlagsRule();
 
     private static final int MAX_VERSION = Integer.MAX_VALUE;
     private static final int INVALID_CHAR_LIMIT_COUNT =
@@ -123,6 +130,7 @@ public class PhoneAccountRegistrarTest extends TelecomTestCase {
     @Mock private DefaultDialerCache mDefaultDialerCache;
     @Mock private AppLabelProxy mAppLabelProxy;
     @Mock private FeatureFlags mTelephonyFeatureFlags;
+    @Mock private AnomalyReporterAdapter mAnomalyReporter;
 
     @Override
     @Before
@@ -141,10 +149,10 @@ public class PhoneAccountRegistrarTest extends TelecomTestCase {
                 .thenReturn(TEST_LABEL);
         mRegistrar = new PhoneAccountRegistrar(
                 mComponentContextFixture.getTestDouble().getApplicationContext(), mLock, FILE_NAME,
-                mDefaultDialerCache, mAppLabelProxy, mTelephonyFeatureFlags, mFeatureFlags);
+                mDefaultDialerCache, mAppLabelProxy, mTelephonyFeatureFlags, mFeatureFlags,
+                mAnomalyReporter);
         when(mFeatureFlags.unregisterUnresolvableAccounts()).thenReturn(true);
         when(mTelephonyFeatureFlags.workProfileApiSplit()).thenReturn(false);
-        when(mFeatureFlags.resolveHiddenDependenciesTwo()).thenReturn(true);
     }
 
     @Override
@@ -201,7 +209,6 @@ public class PhoneAccountRegistrarTest extends TelecomTestCase {
     @MediumTest
     @Test
     public void testPhoneAccountParsing_simultaneousCallingRestriction() throws Exception {
-        doReturn(true).when(mTelephonyFeatureFlags).simultaneousCallingIndications();
         // workaround: UserManager converts the user to a serial and back, we need to mock this
         // behavior, unfortunately: USER_HANDLE_10 <-> 10L
         UserManager userManager = mContext.getSystemService(UserManager.class);
@@ -229,76 +236,6 @@ public class PhoneAccountRegistrarTest extends TelecomTestCase {
                 .build();
         PhoneAccount result = roundTripXml(this, input, PhoneAccountRegistrar.sPhoneAccountXml,
                 mContext, mTelephonyFeatureFlags, mFeatureFlags);
-
-        assertPhoneAccountEquals(input, result);
-    }
-
-    @MediumTest
-    @Test
-    public void testPhoneAccountParsing_simultaneousCallingRestrictionOnOffFlag() throws Exception {
-        // Start the test with the flag on
-        doReturn(true).when(mTelephonyFeatureFlags).simultaneousCallingIndications();
-        // workaround: UserManager converts the user to a serial and back, we need to mock this
-        // behavior, unfortunately: USER_HANDLE_10 <-> 10L
-        UserManager userManager = mContext.getSystemService(UserManager.class);
-        doReturn(10L).when(userManager).getSerialNumberForUser(eq(USER_HANDLE_10));
-        doReturn(USER_HANDLE_10).when(userManager).getUserForSerialNumber(eq(10L));
-        Bundle testBundle = new Bundle();
-        testBundle.putInt("EXTRA_INT_1", 1);
-        testBundle.putInt("EXTRA_INT_100", 100);
-        testBundle.putBoolean("EXTRA_BOOL_TRUE", true);
-        testBundle.putBoolean("EXTRA_BOOL_FALSE", false);
-        testBundle.putString("EXTRA_STR1", "Hello");
-        testBundle.putString("EXTRA_STR2", "There");
-
-        Set<PhoneAccountHandle> restriction = new HashSet<>(10);
-        for (int i = 0; i < 10; i++) {
-            restriction.add(makeQuickAccountHandleForUser("id" + i, USER_HANDLE_10));
-        }
-
-        PhoneAccount input = makeQuickAccountBuilder("id0", 0, USER_HANDLE_10)
-                .addSupportedUriScheme(PhoneAccount.SCHEME_TEL)
-                .addSupportedUriScheme(PhoneAccount.SCHEME_VOICEMAIL)
-                .setExtras(testBundle)
-                .setIsEnabled(true)
-                .setSimultaneousCallingRestriction(restriction)
-                .build();
-        byte[] xmlData = toXml(input, PhoneAccountRegistrar.sPhoneAccountXml, mContext,
-                mTelephonyFeatureFlags, mFeatureFlags);
-        // Simulate turning off the flag after reboot
-        doReturn(false).when(mTelephonyFeatureFlags).simultaneousCallingIndications();
-        PhoneAccount result = fromXml(xmlData, PhoneAccountRegistrar.sPhoneAccountXml, mContext,
-                mTelephonyFeatureFlags, mFeatureFlags);
-
-        assertNotNull(result);
-        assertFalse(result.hasSimultaneousCallingRestriction());
-    }
-
-    @MediumTest
-    @Test
-    public void testPhoneAccountParsing_simultaneousCallingRestrictionOffOnFlag() throws Exception {
-        // Start the test with the flag on
-        doReturn(false).when(mTelephonyFeatureFlags).simultaneousCallingIndications();
-        Bundle testBundle = new Bundle();
-        testBundle.putInt("EXTRA_INT_1", 1);
-        testBundle.putInt("EXTRA_INT_100", 100);
-        testBundle.putBoolean("EXTRA_BOOL_TRUE", true);
-        testBundle.putBoolean("EXTRA_BOOL_FALSE", false);
-        testBundle.putString("EXTRA_STR1", "Hello");
-        testBundle.putString("EXTRA_STR2", "There");
-
-        PhoneAccount input = makeQuickAccountBuilder("id0", 0, USER_HANDLE_10)
-                .addSupportedUriScheme(PhoneAccount.SCHEME_TEL)
-                .addSupportedUriScheme(PhoneAccount.SCHEME_VOICEMAIL)
-                .setExtras(testBundle)
-                .setIsEnabled(true)
-                .build();
-        byte[] xmlData = toXml(input, PhoneAccountRegistrar.sPhoneAccountXml, mContext,
-                mTelephonyFeatureFlags, mFeatureFlags);
-        // Simulate turning on the flag after reboot
-        doReturn(true).when(mTelephonyFeatureFlags).simultaneousCallingIndications();
-        PhoneAccount result = fromXml(xmlData, PhoneAccountRegistrar.sPhoneAccountXml, mContext,
-                mTelephonyFeatureFlags, mFeatureFlags);
 
         assertPhoneAccountEquals(input, result);
     }
@@ -1498,9 +1435,24 @@ public class PhoneAccountRegistrarTest extends TelecomTestCase {
         PhoneAccountRegistrar.State testState = makeQuickStateWithTelephonyPhoneAccountHandle();
         final int mTestPhoneAccountHandleSubIdInt = 123;
         // Mock SubscriptionManager
-        SubscriptionInfo subscriptionInfo = new SubscriptionInfo(
-                mTestPhoneAccountHandleSubIdInt, "id0", 1, "a", "b", 1, 1, "test",
-                        1, null, null, null, null, false, null, null);
+        SubscriptionInfo subscriptionInfo = new SubscriptionInfo.Builder()
+                .setId(mTestPhoneAccountHandleSubIdInt)
+                .setIccId("id0")
+                .setSimSlotIndex(1)
+                .setDisplayName("a")
+                .setCarrierName("b")
+                .setDisplayNameSource(1)
+                .setIconTint(1)
+                .setNumber("test")
+                .setDataRoaming(1)
+                .setIcon(null)
+                .setMcc(null)
+                .setMnc(null)
+                .setCountryIso(null)
+                .setEmbedded(false)
+                .setNativeAccessRules(null)
+                .setCardString(null)
+                .build();
         List<SubscriptionInfo> subscriptionInfoList = new ArrayList<>();
         subscriptionInfoList.add(subscriptionInfo);
         when(mSubscriptionManager.getAllSubscriptionInfoList()).thenReturn(subscriptionInfoList);
@@ -1797,7 +1749,6 @@ public class PhoneAccountRegistrarTest extends TelecomTestCase {
      */
     @Test
     public void testLimitOnSimultaneousCallingRestriction_tooManyElements() throws Exception {
-        doReturn(true).when(mTelephonyFeatureFlags).simultaneousCallingIndications();
         mComponentContextFixture.addConnectionService(makeQuickConnectionServiceComponentName(),
                 Mockito.mock(IConnectionService.class));
         Set<PhoneAccountHandle> tooManyElements = new HashSet<>(11);
@@ -1823,7 +1774,6 @@ public class PhoneAccountRegistrarTest extends TelecomTestCase {
      */
     @Test
     public void testLimitOnSimultaneousCallingRestriction_InvalidPackageName() throws Exception {
-        doReturn(true).when(mTelephonyFeatureFlags).simultaneousCallingIndications();
         mComponentContextFixture.addConnectionService(makeQuickConnectionServiceComponentName(),
                 Mockito.mock(IConnectionService.class));
         Set<PhoneAccountHandle> invalidElement = new HashSet<>(1);
@@ -1848,7 +1798,6 @@ public class PhoneAccountRegistrarTest extends TelecomTestCase {
      */
     @Test
     public void testLimitOnSimultaneousCallingRestriction_InvalidClassName() throws Exception {
-        doReturn(true).when(mTelephonyFeatureFlags).simultaneousCallingIndications();
         mComponentContextFixture.addConnectionService(makeQuickConnectionServiceComponentName(),
                 Mockito.mock(IConnectionService.class));
         Set<PhoneAccountHandle> invalidElement = new HashSet<>(1);
@@ -1873,7 +1822,6 @@ public class PhoneAccountRegistrarTest extends TelecomTestCase {
      */
     @Test
     public void testLimitOnSimultaneousCallingRestriction_InvalidIdSize() throws Exception {
-        doReturn(true).when(mTelephonyFeatureFlags).simultaneousCallingIndications();
         mComponentContextFixture.addConnectionService(makeQuickConnectionServiceComponentName(),
                 Mockito.mock(IConnectionService.class));
         Set<PhoneAccountHandle> invalidIdElement = new HashSet<>(1);
@@ -1909,32 +1857,6 @@ public class PhoneAccountRegistrarTest extends TelecomTestCase {
         }
         finally {
             mRegistrar.unregisterPhoneAccount(handle);
-        }
-    }
-
-    /**
-     * Ensure an IllegalArgumentException is thrown when an Icon that throws an IOException is given
-     */
-    @Test
-    public void testLimitOnIcon() throws Exception {
-        if(mFeatureFlags.resolveHiddenDependenciesTwo()){
-            // skip this test if the new icon logic is running
-           return;
-        }
-        Icon mockIcon = mock(Icon.class);
-        // GIVEN
-        PhoneAccount.Builder builder = makeBuilderWithBindCapabilities(
-                makeQuickAccountHandle(TEST_ID)).setIcon(mockIcon);
-        try {
-            // WHEN
-            doThrow(new IOException())
-                        .when(mockIcon).writeToStream(any(OutputStream.class));
-            //THEN
-            mRegistrar.enforceIconSizeLimit(builder.build());
-            fail("failed to throw IllegalArgumentException");
-        } catch (IllegalArgumentException e) {
-            // pass test
-            assertTrue(e.getMessage().contains(PhoneAccountRegistrar.ICON_ERROR_MSG));
         }
     }
 
@@ -2051,6 +1973,53 @@ public class PhoneAccountRegistrarTest extends TelecomTestCase {
                 simAccount.getAccountHandle().getUserHandle());
 
         // There is nothing to verify, we just want to ensure that we didn't crash.
+    }
+
+    @MediumTest
+    @Test
+    public void testStateSerialization_LocalVoicemailFlag() throws Exception {
+        // --- Setup ---
+        // Create a state object with a local voicemail timeout entry.
+        PhoneAccountRegistrar.State input = makeQuickState();
+        PhoneAccountHandle testHandle = makeQuickAccountHandle("id_voicemail");
+        Duration testDuration = Duration.ofSeconds(30);
+        input.localVoicemailTimeout.put(testHandle, testDuration);
+
+        // --- Test with flag ENABLED ---
+        // Enable the local_voicemail flag to ensure the data is written to XML.
+        mSetFlagsRule.enableFlags("android.telecom.flags.local_voicemail");
+        PhoneAccountRegistrar.State resultWithFlag = roundTripXml(this, input,
+                PhoneAccountRegistrar.sStateXml, mContext, mTelephonyFeatureFlags, mFeatureFlags);
+
+        // Assert that voicemail timeout is correctly serialized and deserialized.
+        assertNotNull(resultWithFlag.localVoicemailTimeout);
+        assertEquals(1, resultWithFlag.localVoicemailTimeout.size());
+        assertEquals(testDuration, resultWithFlag.localVoicemailTimeout.get(testHandle));
+
+        // --- Test with flag DISABLED ---
+        // Disable the local_voicemail flag to ensure the data is NOT written to XML.
+        mSetFlagsRule.disableFlags("android.telecom.flags.local_voicemail");
+        PhoneAccountRegistrar.State resultWithoutFlag = roundTripXml(this, input,
+                PhoneAccountRegistrar.sStateXml, mContext, mTelephonyFeatureFlags, mFeatureFlags);
+
+        // Assert that the voicemail timeout map is empty after deserialization.
+        assertNotNull(resultWithoutFlag.localVoicemailTimeout);
+        assertTrue(resultWithoutFlag.localVoicemailTimeout.isEmpty());
+    }
+
+    @MediumTest
+    @Test
+    public void testLocalVoicemailDuration() throws Exception {
+        PhoneAccountHandle inputAcct = new PhoneAccountHandle(new ComponentName("pkg0", "cls0"),
+                "id0");
+        PhoneAccountRegistrar.LocalVoicemailTimeout input =
+                new PhoneAccountRegistrar.LocalVoicemailTimeout(inputAcct,
+                        Duration.ofSeconds(10));
+        PhoneAccountRegistrar.LocalVoicemailTimeout result = roundTripXml(this, input,
+                PhoneAccountRegistrar.sLocalVoicemailTimeout, mContext,
+                mTelephonyFeatureFlags, mFeatureFlags);
+        assertPhoneAccountHandleEquals(input.phoneAccountHandle, result.phoneAccountHandle);
+        assertEquals(input.timeout, result.timeout);
     }
 
     private static PhoneAccount.Builder makeBuilderWithBindCapabilities(PhoneAccountHandle handle) {
@@ -2348,7 +2317,9 @@ public class PhoneAccountRegistrarTest extends TelecomTestCase {
 
         // Step 1a: Make the bitmap "density-aware" by setting its density to match the test context.
         // This is the key change.
-        testBitmap.setDensity(mContext.getResources().getDisplayMetrics().densityDpi);
+        int densityDpi = mContext.getResources().getDisplayMetrics().densityDpi;
+        testBitmap.setDensity(densityDpi == 0 ? android.util.DisplayMetrics.DENSITY_DEFAULT :
+                densityDpi);
 
         // Step 2: Create a Canvas to draw on the bitmap.
         android.graphics.Canvas canvas = new android.graphics.Canvas(testBitmap);

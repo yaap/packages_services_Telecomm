@@ -40,11 +40,15 @@ import static org.junit.Assert.assertFalse;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.res.Resources;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.OutcomeReceiver;
 import android.os.PersistableBundle;
 import android.os.UserHandle;
+import android.platform.test.annotations.DisableFlags;
+import android.platform.test.annotations.EnableFlags;
+import android.platform.test.flag.junit.SetFlagsRule;
 import android.telecom.CallAttributes;
 import android.telecom.CallException;
 import android.telecom.Connection;
@@ -55,7 +59,7 @@ import android.telephony.CarrierConfigManager;
 
 import androidx.test.filters.SmallTest;
 
-import com.android.server.telecom.Analytics;
+import com.android.internal.telecom.flags.Flags;
 import com.android.server.telecom.AnomalyReporterAdapter;
 import com.android.server.telecom.Call;
 import com.android.server.telecom.CallState;
@@ -64,18 +68,22 @@ import com.android.server.telecom.ClockProxy;
 import com.android.server.telecom.ConnectionServiceFocusManager;
 import com.android.server.telecom.MmiUtils;
 import com.android.server.telecom.PhoneAccountRegistrar;
+import com.android.server.telecom.TelecomResourceId;
 import com.android.server.telecom.Timeouts;
 import com.android.server.telecom.callsequencing.CallSequencingController;
 import com.android.server.telecom.callsequencing.CallTransaction;
 import com.android.server.telecom.callsequencing.voip.OutgoingCallTransactionSequencing;
 import com.android.server.telecom.metrics.TelecomMetricsController;
 import com.android.server.telecom.stats.CallFailureCause;
+import com.android.server.telecom.ui.UiConstants;
 
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 
 import java.util.Arrays;
@@ -98,8 +106,9 @@ public class CallSequencingTests extends TelecomTestCase {
     private static final String NEW_CALL_ID = "TC@2";
 
     private CallSequencingController mController;
-    @Mock
-    private CallsManager mCallsManager;
+    @Rule
+    public final SetFlagsRule mSetFlagsRule = new SetFlagsRule();
+    @Mock CallsManager mCallsManager;
     @Mock Context mContext;
     @Mock ClockProxy mClockProxy;
     @Mock AnomalyReporterAdapter mAnomalyReporter;
@@ -112,13 +121,17 @@ public class CallSequencingTests extends TelecomTestCase {
     @Mock Call mHeldCall;
     @Mock Call mNewCall;
     @Mock Call mRingingCall;
+    @Mock Resources mResources;
 
     @Override
     @Before
     public void setUp() throws Exception {
         super.setUp();
+        when(mContext.getResources()).thenReturn(mResources);
+        TelecomResourceId.setTelecomContext(mContext);
         mController = new CallSequencingController(mCallsManager, mContext, mClockProxy,
-                mAnomalyReporter, mTimeoutsAdapter, mMetricsController, mMmiUtils, mFeatureFlags);
+                mAnomalyReporter, mTimeoutsAdapter, mMetricsController, mMmiUtils,
+                TELECOM_UI_PACKAGE_NAME, mFeatureFlags);
 
         when(mActiveCall.getState()).thenReturn(CallState.ACTIVE);
         when(mRingingCall.getState()).thenReturn(CallState.RINGING);
@@ -131,6 +144,7 @@ public class CallSequencingTests extends TelecomTestCase {
     @Override
     @After
     public void tearDown() throws Exception {
+        TelecomResourceId.setTelecomContext(null);
         super.tearDown();
     }
 
@@ -211,7 +225,7 @@ public class CallSequencingTests extends TelecomTestCase {
 
     @SmallTest
     @Test
-    public void testAnswerCallAcceptedFromTelecom() {
+    public void testAnswerCallAcceptedFromTelecom_HoldableManaged() {
         setPhoneAccounts(mNewCall, mActiveCall, false);
         setActiveCallFocus(mActiveCall);
         when(mCallsManager.canHold(mActiveCall)).thenReturn(true);
@@ -227,10 +241,26 @@ public class CallSequencingTests extends TelecomTestCase {
 
     @SmallTest
     @Test
+    public void testAnswerCallAcceptedFromTelecom_NonholdableManaged() {
+        setPhoneAccounts(mNewCall, mActiveCall, false);
+        setActiveCallFocus(mActiveCall);
+        when(mCallsManager.canHold(mActiveCall)).thenReturn(false);
+
+        when(mHeldCall.isSelfManaged()).thenReturn(false);
+        when(mNewCall.isSelfManaged()).thenReturn(true);
+        mController.answerCall(mNewCall, 0, CallsManager.REQUEST_ORIGIN_TELECOM_DISAMBIGUATION);
+        verify(mCallsManager, timeout(SEQUENCING_TIMEOUT_MS).times(1))
+                .requestFocusActionAnswerCall(eq(mNewCall), eq(0),
+                        eq(CallsManager.REQUEST_ORIGIN_TELECOM_DISAMBIGUATION));
+    }
+
+    @SmallTest
+    @Test
     public void testSetSelfManagedCallActive() {
         // This will allow holdActiveCallForNewCallWithSequencing to immediately return true
         setActiveCallFocus(null);
-        mController.handleSetSelfManagedCallActive(mNewCall);
+        when(mNewCall.isSelfManaged()).thenReturn(true);
+        mController.handleSetCallActive(mNewCall);
         verify(mCallsManager, timeout(SEQUENCING_TIMEOUT_MS))
                 .requestActionSetActiveCall(eq(mNewCall), anyString());
     }
@@ -239,9 +269,29 @@ public class CallSequencingTests extends TelecomTestCase {
     @Test
     public void testSetSelfManagedCallActiveFail() {
         setupHoldActiveCallForNewCallFailMocks();
-        mController.handleSetSelfManagedCallActive(mNewCall);
+        when(mNewCall.isSelfManaged()).thenReturn(true);
+        mController.handleSetCallActive(mNewCall);
         verify(mCallsManager, timeout(SEQUENCING_TIMEOUT_MS).times(0))
                 .requestActionSetActiveCall(eq(mNewCall), anyString());
+    }
+
+    @SmallTest
+    @Test
+    public void testSetManagedCallActive() {
+        // This will allow holdActiveCallForNewCallWithSequencing to immediately return true
+        setActiveCallFocus(null);
+        mController.handleSetCallActive(mNewCall);
+        verify(mCallsManager, timeout(SEQUENCING_TIMEOUT_MS))
+                .requestFocusForSetManagedActive(eq(mNewCall));
+    }
+
+    @SmallTest
+    @Test
+    public void testSetManagedCallActiveFail() {
+        setupHoldActiveCallForNewCallFailMocks();
+        mController.handleSetCallActive(mNewCall);
+        verify(mCallsManager, timeout(SEQUENCING_TIMEOUT_MS).times(0))
+                .requestFocusForSetManagedActive(eq(mNewCall));
     }
 
     @SmallTest
@@ -571,16 +621,10 @@ public class CallSequencingTests extends TelecomTestCase {
     public void testMakeRoomForOutgoingCall() {
         setupMakeRoomForOutgoingCallMocks();
         when(mActiveCall.hold(anyString())).thenReturn(CompletableFuture.completedFuture(true));
-        Analytics.CallInfo newCallAnalytics = mock(Analytics.CallInfo.class);
-        Analytics.CallInfo activeCallAnalytics = mock(Analytics.CallInfo.class);
-        when(mNewCall.getAnalytics()).thenReturn(newCallAnalytics);
-        when(mActiveCall.getAnalytics()).thenReturn(activeCallAnalytics);
         when(mCallsManager.canHold(mActiveCall)).thenReturn(true);
 
         CompletableFuture<Boolean> future = mController.makeRoomForOutgoingCall(false, mNewCall);
         verify(mActiveCall, timeout(SEQUENCING_TIMEOUT_MS)).hold(anyString());
-        verify(newCallAnalytics).setCallIsAdditional(eq(true));
-        verify(activeCallAnalytics).setCallIsInterrupted(eq(true));
         assertTrue(waitForFutureResult(future, false));
     }
 
@@ -610,12 +654,42 @@ public class CallSequencingTests extends TelecomTestCase {
 
     @Test
     @SmallTest
-    public void testMakeRoomForOutgoingCallFail_RingingCall() {
+    @EnableFlags(Flags.FLAG_ADD_ESCAPE_HATCH_FOR_STUCK_VOIP)
+    public void testMakeRoomForOutgoingCallFail_RingingCall_FlagEnabled() {
+        when(mNewCall.isSelfManaged()).thenReturn(false);
+        when(mCallsManager.hasManagedRingingOrSimulatedRingingCall()).thenReturn(true);
+        when(mCallsManager.getRingingOrSimulatedRingingCall()).thenReturn(mRingingCall);
+        when(mRingingCall.getTargetPhoneAccountLabel()).thenReturn("TestApp");
+
+        CompletableFuture<Boolean> future = mController.makeRoomForOutgoingCall(false, mNewCall);
+        assertFalse(waitForFutureResult(future, true));
+
+        ArgumentCaptor<Intent> intentCaptor = ArgumentCaptor.forClass(Intent.class);
+        verify(mContext).startActivityAsUser(intentCaptor.capture(), eq(UserHandle.CURRENT));
+        Intent intent = intentCaptor.getValue();
+        assertEquals(UiConstants.COMPONENT_CONFIRM_CALL_DIALOG,
+                intent.getComponent().getClassName());
+        assertEquals("TestApp", intent.getCharSequenceExtra(
+                UiConstants.EXTRA_ONGOING_APP_NAME).toString());
+        assertEquals(NEW_CALL_ID, intent.getStringExtra(
+                UiConstants.EXTRA_OUTGOING_CALL_ID));
+    }
+
+    @Test
+    @SmallTest
+    @DisableFlags(Flags.FLAG_ADD_ESCAPE_HATCH_FOR_STUCK_VOIP)
+    public void testMakeRoomForOutgoingCallFail_RingingCall_FlagDisabled() {
         when(mNewCall.isSelfManaged()).thenReturn(false);
         when(mCallsManager.hasManagedRingingOrSimulatedRingingCall()).thenReturn(true);
 
         CompletableFuture<Boolean> future = mController.makeRoomForOutgoingCall(false, mNewCall);
         assertFalse(waitForFutureResult(future, true));
+
+        ArgumentCaptor<Intent> intentCaptor = ArgumentCaptor.forClass(Intent.class);
+        verify(mContext).startActivityAsUser(intentCaptor.capture(), eq(UserHandle.CURRENT));
+        Intent intent = intentCaptor.getValue();
+        assertEquals(UiConstants.COMPONENT_ERROR_DIALOG,
+                intent.getComponent().getClassName());
     }
 
     @Test
@@ -667,10 +741,121 @@ public class CallSequencingTests extends TelecomTestCase {
         verify(mNewCall, times(0)).setOverrideDisconnectCauseCode(any(DisconnectCause.class));
     }
 
+    /**
+     * Verifies that when an incoming call arrives on the same PhoneAccount as an active,
+     * unholdable Transactional call, Telecom explicitly disconnects the active call to ensure
+     * focus can be granted to the new call, while ensuring the new call itself is not disconnected.
+     */
+    @Test
+    @SmallTest
+    public void testHoldCallForNewCall_TransactionalSameAccount_Disconnect() {
+        setPhoneAccounts(mNewCall, mActiveCall, true); // Same account
+        setActiveCallFocus(mActiveCall);
+        when(mCallsManager.canHold(mActiveCall)).thenReturn(false);
+        when(mCallsManager.supportsHold(mActiveCall)).thenReturn(false);
+        when(mActiveCall.isTransactionalCall()).thenReturn(true);
+        // Include BOTH calls in the list to verify exclusion logic
+        when(mCallsManager.getCalls()).thenReturn(Arrays.asList(mActiveCall, mNewCall));
+        when(mActiveCall.disconnect(anyString())).thenReturn(
+                CompletableFuture.completedFuture(true));
+        when(mNewCall.disconnect(anyString())).thenReturn(
+                CompletableFuture.completedFuture(true));
+
+        assertTrue(CallSequencingController.arePhoneAccountsSame(mNewCall, mActiveCall));
+        CompletableFuture<Boolean> resultFuture = mController
+                .holdActiveCallForNewCallWithSequencing(mNewCall,
+                        CallsManager.REQUEST_ORIGIN_UNKNOWN);
+
+        // This should now disconnect the active call
+        verify(mActiveCall, timeout(SEQUENCING_TIMEOUT_MS)).disconnect(anyString());
+        // But it should NOT disconnect the new call
+        verify(mNewCall, never()).disconnect(anyString());
+        assertTrue(waitForFutureResult(resultFuture, false));
+    }
+
+    @Test
+    @SmallTest
+    public void testMaybeAddAnsweringCallDropsFg_VoLTE_VoWiFi() {
+        PersistableBundle bundle = new PersistableBundle();
+        bundle.putBoolean(CarrierConfigManager.KEY_SHOW_VOWIFI_DROP_DIALOG_ON_DSDS_BOOL, true);
+        when(mCallsManager.getCarrierConfigForPhoneAccount(any())).thenReturn(bundle);
+
+        when(mCallsManager.isDsdaCallingPossible()).thenReturn(false);
+        when(mActiveCall.wasVolte()).thenReturn(true);
+        when(mNewCall.wasWifi()).thenReturn(true);
+        when(mActiveCall.getTargetPhoneAccountLabel()).thenReturn("ActiveApp");
+        when(mCallsManager.supportsHold(mActiveCall)).thenReturn(true);
+        setPhoneAccounts(mNewCall, mActiveCall, false);
+
+        mController.maybeAddAnsweringCallDropsFg(mActiveCall, mNewCall);
+
+        ArgumentCaptor<Bundle> bundleCaptor = ArgumentCaptor.forClass(Bundle.class);
+        verify(mNewCall).putInternalExtras(bundleCaptor.capture());
+        Bundle resultBundle = bundleCaptor.getValue();
+        assertTrue(resultBundle.getBoolean(Connection.EXTRA_ANSWERING_DROPS_FG_CALL));
+        assertEquals("ActiveApp", resultBundle.getCharSequence(
+                Connection.EXTRA_ANSWERING_DROPS_FG_CALL_APP_NAME));
+    }
+
+    @Test
+    @SmallTest
+    public void testMaybeAddAnsweringCallDropsFg_VoLTE_VoWiFi_ConfigDisabled() {
+        PersistableBundle bundle = new PersistableBundle();
+        bundle.putBoolean(CarrierConfigManager.KEY_SHOW_VOWIFI_DROP_DIALOG_ON_DSDS_BOOL, false);
+        when(mCallsManager.getCarrierConfigForPhoneAccount(any())).thenReturn(bundle);
+
+        when(mCallsManager.isDsdaCallingPossible()).thenReturn(false);
+        when(mActiveCall.wasVolte()).thenReturn(true);
+        when(mNewCall.wasWifi()).thenReturn(true);
+        when(mActiveCall.getTargetPhoneAccountLabel()).thenReturn("ActiveApp");
+        when(mCallsManager.supportsHold(mActiveCall)).thenReturn(true);
+        setPhoneAccounts(mNewCall, mActiveCall, false);
+
+        mController.maybeAddAnsweringCallDropsFg(mActiveCall, mNewCall);
+
+        verify(mNewCall, never()).putInternalExtras(any(Bundle.class));
+    }
+
+    @Test
+    @SmallTest
+    public void testMaybeAddAnsweringCallDropsFg_VoLTE_VoWiFi_Dsda() {
+        PersistableBundle bundle = new PersistableBundle();
+        bundle.putBoolean(CarrierConfigManager.KEY_SHOW_VOWIFI_DROP_DIALOG_ON_DSDS_BOOL, true);
+        when(mCallsManager.getCarrierConfigForPhoneAccount(any())).thenReturn(bundle);
+        when(mCallsManager.isDsdaCallingPossible()).thenReturn(true);
+        when(mActiveCall.wasVolte()).thenReturn(true);
+        when(mNewCall.wasWifi()).thenReturn(true);
+        when(mCallsManager.supportsHold(mActiveCall)).thenReturn(true);
+        when(mActiveCall.getTargetPhoneAccountLabel()).thenReturn("ActiveApp");
+        setPhoneAccounts(mNewCall, mActiveCall, false);
+
+        mController.maybeAddAnsweringCallDropsFg(mActiveCall, mNewCall);
+        verify(mNewCall, never()).putInternalExtras(any(Bundle.class));
+    }
+
+    @Test
+    @SmallTest
+    public void testMaybeAddAnsweringCallDropsFg_NoVoLTE_VoWiFi() {
+        PersistableBundle bundle = new PersistableBundle();
+        bundle.putBoolean(CarrierConfigManager.KEY_SHOW_VOWIFI_DROP_DIALOG_ON_DSDS_BOOL, true);
+        when(mCallsManager.getCarrierConfigForPhoneAccount(any())).thenReturn(bundle);
+        when(mActiveCall.wasVolte()).thenReturn(false);
+        when(mNewCall.wasWifi()).thenReturn(true);
+        setPhoneAccounts(mNewCall, mActiveCall, false);
+        when(mCallsManager.supportsHold(mActiveCall)).thenReturn(true);
+
+        mController.maybeAddAnsweringCallDropsFg(mActiveCall, mNewCall);
+
+        verify(mNewCall, never()).putInternalExtras(any(Bundle.class));
+    }
+
     /* Helpers */
     private void setPhoneAccounts(Call call1, Call call2, boolean useSamePhoneAccount) {
         when(call1.getTargetPhoneAccount()).thenReturn(mHandle1);
+        when(call1.getDelegatePhoneAccountHandle()).thenReturn(mHandle1);
         when(call2.getTargetPhoneAccount()).thenReturn(useSamePhoneAccount ? mHandle1 : mHandle2);
+        when(call2.getDelegatePhoneAccountHandle())
+                .thenReturn(useSamePhoneAccount ? mHandle1 : mHandle2);
     }
 
     private void setActiveCallFocus(Call call) {
@@ -690,7 +875,6 @@ public class CallSequencingTests extends TelecomTestCase {
         when(mCallsManager.canHold(mActiveCall)).thenReturn(true);
 
         // Setup analytics mocks
-        setupCallAnalytics(Arrays.asList(mNewCall, mActiveCall, mRingingCall));
 
         // Setup ecall related checks
         setupEmergencyCallPaCapabilities();
@@ -755,13 +939,6 @@ public class CallSequencingTests extends TelecomTestCase {
                 .setCallType(CallAttributes.AUDIO_CALL)
                 .setCallCapabilities(CallAttributes.SUPPORTS_SET_INACTIVE)
                 .build();
-    }
-
-    private void setupCallAnalytics(List<Call> calls) {
-        for (Call call: calls) {
-            Analytics.CallInfo analyticsInfo = mock(Analytics.CallInfo.class);
-            when(call.getAnalytics()).thenReturn(analyticsInfo);
-        }
     }
 
     private boolean waitForFutureResult(CompletableFuture<Boolean> future, boolean defaultValue) {

@@ -23,8 +23,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
-import android.content.res.Resources;
-import android.os.Looper;
+import android.os.Handler;
 import android.telecom.Connection;
 import android.telecom.Log;
 import android.telecom.Logging.Session;
@@ -37,9 +36,8 @@ import android.text.SpannableString;
 import android.text.TextUtils;
 import android.widget.Toast;
 
-import com.android.server.telecom.flags.FeatureFlags;
+import com.android.server.telecom.ui.UiConstants;
 
-import java.text.Bidi;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -80,14 +78,61 @@ public class RespondViaSmsManager extends CallsManagerListenerBase {
     private final CallsManager mCallsManager;
     private final TelecomSystem.SyncRoot mLock;
     private final Executor mAsyncExecutor;
-    private final FeatureFlags mFeatureFlags;
 
     public RespondViaSmsManager(CallsManager callsManager, TelecomSystem.SyncRoot lock,
-        Executor asyncExecutor, FeatureFlags featureFlags) {
+        Executor asyncExecutor) {
         mCallsManager = callsManager;
         mLock = lock;
         mAsyncExecutor = asyncExecutor;
-        mFeatureFlags = featureFlags;
+
+        BroadcastReceiver receiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (QuickResponseUtils.ACTION_UPDATE_CANNED_TEXT_MESSAGES.equals(
+                            intent.getAction())) {
+                    Log.i(RespondViaSmsManager.this, "Received canned text messages update");
+                    updateCannedTextMessages(intent, context);
+                }
+            }
+        };
+        IntentFilter intentFilter =
+                new IntentFilter(QuickResponseUtils.ACTION_UPDATE_CANNED_TEXT_MESSAGES);
+        mCallsManager.getContext().registerReceiver(receiver, intentFilter,
+                UiConstants.TELECOM_UI_ACCESS_PERMISSION, null,
+                Context.RECEIVER_EXPORTED);
+    }
+
+    private void updateCannedTextMessages(Intent intent, Context context) {
+        SharedPreferences prefs = context.getSharedPreferences(
+                QuickResponseUtils.SHARED_PREFERENCES_NAME,
+                Context.MODE_PRIVATE | Context.MODE_MULTI_PROCESS);
+        SharedPreferences.Editor editor = prefs.edit();
+
+        if (intent.hasExtra(QuickResponseUtils.EXTRA_CANNED_RESPONSE_1)) {
+            editor.putString(QuickResponseUtils.KEY_CANNED_RESPONSE_PREF_1,
+                    intent.getStringExtra(QuickResponseUtils.EXTRA_CANNED_RESPONSE_1));
+        } else {
+            editor.remove(QuickResponseUtils.KEY_CANNED_RESPONSE_PREF_1);
+        }
+        if (intent.hasExtra(QuickResponseUtils.EXTRA_CANNED_RESPONSE_2)) {
+            editor.putString(QuickResponseUtils.KEY_CANNED_RESPONSE_PREF_2,
+                    intent.getStringExtra(QuickResponseUtils.EXTRA_CANNED_RESPONSE_2));
+        } else {
+            editor.remove(QuickResponseUtils.KEY_CANNED_RESPONSE_PREF_2);
+        }
+        if (intent.hasExtra(QuickResponseUtils.EXTRA_CANNED_RESPONSE_3)) {
+            editor.putString(QuickResponseUtils.KEY_CANNED_RESPONSE_PREF_3,
+                    intent.getStringExtra(QuickResponseUtils.EXTRA_CANNED_RESPONSE_3));
+        } else {
+            editor.remove(QuickResponseUtils.KEY_CANNED_RESPONSE_PREF_3);
+        }
+        if (intent.hasExtra(QuickResponseUtils.EXTRA_CANNED_RESPONSE_4)) {
+            editor.putString(QuickResponseUtils.KEY_CANNED_RESPONSE_PREF_4,
+                    intent.getStringExtra(QuickResponseUtils.EXTRA_CANNED_RESPONSE_4));
+        } else {
+            editor.remove(QuickResponseUtils.KEY_CANNED_RESPONSE_PREF_4);
+        }
+        editor.commit();
     }
 
     /**
@@ -103,38 +148,25 @@ public class RespondViaSmsManager extends CallsManagerListenerBase {
      */
     public void loadCannedTextMessages(final CallsManager.Response<Void, List<String>> response,
             final Context context) {
-        if (mFeatureFlags.enableRespondViaSmsManagerAsync()) {
-            CompletableFuture<List<String>> cannedTextMessages = new CompletableFuture<>();
-            Session s = Log.createSubsession();
-            mAsyncExecutor.execute(() -> {
-                try {
-                    Log.continueSession(s, "RVSM.lCTM.e");
-                    cannedTextMessages.complete(loadCannedTextMessages(context));
-                } finally {
-                    Log.endSession();
+        CompletableFuture<List<String>> cannedTextMessages = new CompletableFuture<>();
+        Session s = Log.createSubsession();
+        mAsyncExecutor.execute(() -> {
+            try {
+                Log.continueSession(s, "RVSM.lCTM.e");
+                cannedTextMessages.complete(loadCannedTextMessages(context));
+            } finally {
+                Log.endSession();
+            }
+        });
+        cannedTextMessages.whenCompleteAsync((result, exception) -> {
+                if (exception != null) {
+                    Log.e(RespondViaSmsManager.class.getSimpleName(), exception,
+                            "loadCannedTextMessages failed");
+                    response.onError(null, -1, exception.toString());
+                } else {
+                    response.onResult(null, result);
                 }
-            });
-            cannedTextMessages.whenCompleteAsync((result, exception) -> {
-                    if (exception != null) {
-                        Log.e(RespondViaSmsManager.class.getSimpleName(), exception,
-                                "loadCannedTextMessages failed");
-                        response.onError(null, -1, exception.toString());
-                    } else {
-                        response.onResult(null, result);
-                    }
-                }, new LoggedHandlerExecutor(context.getMainThreadHandler(), "RVSM.lCTM.c", mLock));
-
-        } else {
-          new Thread() {
-                @Override
-                public void run() {
-                    List<String> textMessages = loadCannedTextMessages(context);
-                    synchronized (mLock) {
-                        response.onResult(null, textMessages);
-                    }
-                }
-            }.start();
-        }
+        }, new LoggedHandlerExecutor(new Handler(context.getMainLooper()), "RVSM.lCTM.c", mLock));
     }
 
     private List<String> loadCannedTextMessages(final Context context) {
@@ -147,7 +179,6 @@ public class RespondViaSmsManager extends CallsManagerListenerBase {
         final SharedPreferences prefs = context.getSharedPreferences(
                 QuickResponseUtils.SHARED_PREFERENCES_NAME,
                 Context.MODE_PRIVATE | Context.MODE_MULTI_PROCESS);
-        final Resources res = context.getResources();
 
         final ArrayList<String> textMessages = new ArrayList<>(
                 QuickResponseUtils.NUM_CANNED_RESPONSES);
@@ -160,13 +191,13 @@ public class RespondViaSmsManager extends CallsManagerListenerBase {
         // Note the default values here must agree with the corresponding
         // android:defaultValue attributes in respond_via_sms_settings.xml.
         textMessages.add(0, prefs.getString(QuickResponseUtils.KEY_CANNED_RESPONSE_PREF_1,
-                res.getString(R.string.respond_via_sms_canned_response_1)));
+                TelecomResourceId.getString(context, "respond_via_sms_canned_response_1")));
         textMessages.add(1, prefs.getString(QuickResponseUtils.KEY_CANNED_RESPONSE_PREF_2,
-                res.getString(R.string.respond_via_sms_canned_response_2)));
+                TelecomResourceId.getString(context, "respond_via_sms_canned_response_2")));
         textMessages.add(2, prefs.getString(QuickResponseUtils.KEY_CANNED_RESPONSE_PREF_3,
-                res.getString(R.string.respond_via_sms_canned_response_3)));
+                TelecomResourceId.getString(context, "respond_via_sms_canned_response_3")));
         textMessages.add(3, prefs.getString(QuickResponseUtils.KEY_CANNED_RESPONSE_PREF_4,
-                res.getString(R.string.respond_via_sms_canned_response_4)));
+                TelecomResourceId.getString(context, "respond_via_sms_canned_response_4")));
 
         Log.d(RespondViaSmsManager.this,
                 "loadCannedResponses() completed, found responses: %s",
@@ -191,10 +222,9 @@ public class RespondViaSmsManager extends CallsManagerListenerBase {
         // ...and show a brief confirmation to the user (since
         // otherwise it's hard to be sure that anything actually
         // happened.)
-        final Resources res = context.getResources();
-        final String formatString = res.getString(success
-                ? R.string.respond_via_sms_confirmation_format
-                : R.string.respond_via_sms_failure_format);
+        final String formatString = TelecomResourceId.getString(context, success
+                ? "respond_via_sms_confirmation_format"
+                : "respond_via_sms_failure_format");
         final BidiFormatter phoneNumberFormatter = BidiFormatter.getInstance();
         final String confirmationMsg = String.format(formatString,
                 phoneNumberFormatter.unicodeWrap(phoneNumber));
@@ -235,19 +265,15 @@ public class RespondViaSmsManager extends CallsManagerListenerBase {
                     subId);
             return;
         }
-        if(mFeatureFlags.enableRespondViaSmsManagerAsync()) {
-            Session s = Log.createSubsession();
-            mAsyncExecutor.execute(() -> {
-                try {
-                    Log.continueSession(s, "RVSM.rCWM.e");
-                    sendTextMessage(context, phoneNumber, textMessage, subId, contactName);
-                } finally {
-                    Log.endSession();
-                }
-            });
-        } else {
-            sendTextMessage(context, phoneNumber, textMessage, subId, contactName);
-        }
+        Session s = Log.createSubsession();
+        mAsyncExecutor.execute(() -> {
+            try {
+                Log.continueSession(s, "RVSM.rCWM.e");
+                sendTextMessage(context, phoneNumber, textMessage, subId, contactName);
+            } finally {
+                Log.endSession();
+            }
+        });
     }
 
     private void sendTextMessage(Context context, String phoneNumber, String textMessage,

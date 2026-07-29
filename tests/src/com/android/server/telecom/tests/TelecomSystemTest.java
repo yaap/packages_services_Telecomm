@@ -30,7 +30,6 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeast;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
@@ -43,13 +42,12 @@ import static org.mockito.Mockito.when;
 import android.annotation.Nullable;
 import android.app.AppOpsManager;
 import android.bluetooth.BluetoothManager;
-import android.content.BroadcastReceiver;
 import android.content.ComponentName;
-import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.res.Resources;
+import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
-import android.media.IAudioService;
 import android.media.ToneGenerator;
 import android.net.Uri;
 import android.os.Bundle;
@@ -58,6 +56,7 @@ import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.Process;
 import android.os.UserHandle;
+import android.os.UserManager;
 import android.telecom.Call;
 import android.telecom.ConnectionRequest;
 import android.telecom.DisconnectCause;
@@ -74,7 +73,6 @@ import com.android.internal.telecom.IInCallAdapter;
 import com.android.server.telecom.AnomalyReporterAdapter;
 import com.android.server.telecom.AsyncRingtonePlayer;
 import com.android.server.telecom.AudioRoute;
-import com.android.server.telecom.CallAudioManager;
 import com.android.server.telecom.CallAudioModeStateMachine;
 import com.android.server.telecom.CallAudioRouteAdapter;
 import com.android.server.telecom.CallAudioRouteController;
@@ -84,7 +82,6 @@ import com.android.server.telecom.CallsManagerListenerBase;
 import com.android.server.telecom.ClockProxy;
 import com.android.server.telecom.ConnectionServiceFocusManager;
 import com.android.server.telecom.ContactsAsyncHelper;
-import com.android.server.telecom.DeviceIdleControllerAdapter;
 import com.android.server.telecom.HeadsetMediaButton;
 import com.android.server.telecom.HeadsetMediaButtonFactory;
 import com.android.server.telecom.InCallWakeLockController;
@@ -98,12 +95,12 @@ import com.android.server.telecom.Ringer;
 import com.android.server.telecom.RoleManagerAdapter;
 import com.android.server.telecom.StatusBarNotifier;
 import com.android.server.telecom.SystemStateHelper;
+import com.android.server.telecom.TelecomResourceId;
 import com.android.server.telecom.TelecomSystem;
 import com.android.server.telecom.Timeouts;
 import com.android.server.telecom.WiredHeadsetManager;
 import com.android.server.telecom.bluetooth.BluetoothRouteManager;
 import com.android.server.telecom.callfiltering.BlockedNumbersAdapter;
-import com.android.server.telecom.callsequencing.voip.VoipCallMonitor;
 import com.android.server.telecom.components.UserCallIntentProcessor;
 import com.android.server.telecom.flags.FeatureFlags;
 import com.android.server.telecom.metrics.TelecomMetricsController;
@@ -111,19 +108,14 @@ import com.android.server.telecom.ui.IncomingCallNotifier;
 
 import com.google.common.base.Predicate;
 
-import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
-import org.mockito.invocation.InvocationOnMock;
-import org.mockito.stubbing.Answer;
 
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
-import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -219,15 +211,11 @@ public class TelecomSystemTest extends TelecomTestCase{
     @Mock ClockProxy mClockProxy;
     @Mock RoleManagerAdapter mRoleManagerAdapter;
     @Mock ToneGenerator mToneGenerator;
-    @Mock DeviceIdleControllerAdapter mDeviceIdleControllerAdapter;
-
     @Mock Ringer.AccessibilityManagerAdapter mAccessibilityManagerAdapter;
-    @Mock
-    BlockedNumbersAdapter mBlockedNumbersAdapter;
-    @Mock
-    FeatureFlags mFeatureFlags;
-    @Mock
-    com.android.internal.telephony.flags.FeatureFlags mTelephonyFlags;
+    @Mock BlockedNumbersAdapter mBlockedNumbersAdapter;
+    @Mock FeatureFlags mFeatureFlags;
+    @Mock android.telecom.flags.FeatureFlags mModuleFeatureFlags;
+    @Mock com.android.internal.telephony.flags.FeatureFlags mTelephonyFlags;
     @Mock Ringer.VibratorAdapter mVibratorAdapter;
 
     private static final String SYSTEM_UI_PACKAGE = "com.android.systemui";
@@ -356,8 +344,6 @@ public class TelecomSystemTest extends TelecomTestCase{
 
     CallerInfoAsyncQueryFactoryFixture mCallerInfoAsyncQueryFactoryFixture;
 
-    IAudioService mAudioService;
-
     TelecomSystem mTelecomSystem;
 
     Context mSpyContext;
@@ -382,6 +368,7 @@ public class TelecomSystemTest extends TelecomTestCase{
     public void setUp() throws Exception {
         super.setUp();
         mSpyContext = mComponentContextFixture.getTestDouble().getApplicationContext();
+        TelecomResourceId.setTelecomContext(mSpyContext);
         doReturn(mSpyContext).when(mSpyContext).getApplicationContext();
         doNothing().when(mSpyContext).sendBroadcastAsUser(any(), any(), any());
 
@@ -404,6 +391,7 @@ public class TelecomSystemTest extends TelecomTestCase{
 
         // Next, create the TelecomSystem, our system under test
         setupTelecomSystem();
+        mTelecomSystem.getMetricsController().setTestMode(true);
         // Need to reset testing tag here
         Log.setTag(TESTING_TAG);
 
@@ -425,10 +413,6 @@ public class TelecomSystemTest extends TelecomTestCase{
             }
             handlerThreads.clear();
 
-            VoipCallMonitor vcm = mTelecomSystem.getCallsManager().getVoipCallMonitor();
-            if (vcm != null) {
-                vcm.unregisterNotificationListener();
-            }
             if (mTelecomSystem.getCallsManager().getCallAudioManager() != null
                     && mTelecomSystem.getCallsManager().getCallAudioManager()
                     .getCallAudioRouteAdapter() != null) {
@@ -466,7 +450,7 @@ public class TelecomSystemTest extends TelecomTestCase{
             mConnectionServiceFixtureA.waitForHandlerToClear();
         }
 
-        if (mConnectionServiceFixtureA != null) {
+        if (mConnectionServiceFixtureB != null) {
             mConnectionServiceFixtureB.waitForHandlerToClear();
         }
 
@@ -475,6 +459,7 @@ public class TelecomSystemTest extends TelecomTestCase{
         Log.getSessionManager().cleanupStaleSessions(0);
 
         mTelecomSystem = null;
+        TelecomResourceId.setTelecomContext(null);
         super.tearDown();
     }
 
@@ -523,7 +508,6 @@ public class TelecomSystemTest extends TelecomTestCase{
                 spy(new ProximitySensorManagerFactoryF());
         InCallWakeLockControllerFactory inCallWakeLockControllerFactory =
                 spy(new InCallWakeLockControllerFactoryF());
-        mAudioService = setupAudioService();
 
         mCallerInfoAsyncQueryFactoryFixture = new CallerInfoAsyncQueryFactoryFixture();
 
@@ -546,36 +530,33 @@ public class TelecomSystemTest extends TelecomTestCase{
         when(mRoleManagerAdapter.getBTInCallService()).thenReturn(new String[] {"bt_pkg"});
         mTelecomSystem = new TelecomSystem(
                 mComponentContextFixture.getTestDouble(),
-                (context, phoneAccountRegistrar, defaultDialerCache, mDeviceIdleControllerAdapter,
-                        mFeatureFlag)
+                (context, phoneAccountRegistrar, defaultDialerCache, mFeatureFlag)
                         -> mMissedCallNotifier,
                 mCallerInfoAsyncQueryFactoryFixture.getTestDouble(),
                 headsetMediaButtonFactory,
                 proximitySensorManagerFactory,
                 inCallWakeLockControllerFactory,
-                () -> mAudioService,
                 mConnServFMFactory,
                 mTimeoutsAdapter,
                 mAsyncRingtonePlayer,
-                new PhoneNumberUtilsAdapterImpl(),
+                new PhoneNumberUtilsAdapterImpl(mContext),
                 mIncomingCallNotifier,
                 (streamType, volume) -> mToneGenerator,
                 new CallAudioRouteController.Factory() {
                     public CallAudioRouteController create(
                             Context context,
                             CallsManager callsManager,
-                            BluetoothRouteManager bluetoothManager,
+                            AudioRoute.Factory audioRouteFactory,
                             WiredHeadsetManager wiredHeadsetManager,
+                            BluetoothRouteManager bluetoothManager,
                             StatusBarNotifier statusBarNotifier,
-                            CallAudioManager.AudioServiceFactory audioServiceFactory,
                             FeatureFlags featureFlags,
                             TelecomMetricsController metricsController,
                             AsyncRingtonePlayer ringtonePlayer,
                             AnomalyReporterAdapter anomalyReporter) {
                         return new CallAudioRouteController(context,
                                 callsManager,
-                                audioServiceFactory,
-                                new AudioRoute.Factory(),
+                                audioRouteFactory,
                                 wiredHeadsetManager,
                                 bluetoothManager,
                                 statusBarNotifier,
@@ -601,12 +582,15 @@ public class TelecomSystemTest extends TelecomTestCase{
                             ContactsAsyncHelper.ContentResolverAdapter adapter) {
                         return new ContactsAsyncHelper(adapter, mHandlerThread.getLooper());
                     }
-                }, mDeviceIdleControllerAdapter, SYSTEM_UI_PACKAGE,
+                },
+                SYSTEM_UI_PACKAGE,
+                TELECOM_UI_PACKAGE_NAME,
                 mAccessibilityManagerAdapter,
                 Runnable::run,
                 Runnable::run,
                 mBlockedNumbersAdapter,
                 mFeatureFlags,
+                mModuleFeatureFlags,
                 mTelephonyFlags,
                 mHandlerThread.getLooper(),
                 mVibratorAdapter);
@@ -645,17 +629,28 @@ public class TelecomSystemTest extends TelecomTestCase{
         mTelecomSystem.getPhoneAccountRegistrar().registerPhoneAccount(mPhoneAccountE1);
         mTelecomSystem.getPhoneAccountRegistrar().registerPhoneAccount(mPhoneAccountMultiUser);
 
+        // Assume the Users are in the same ProfileGroup by default
+        UserManager um = mContext.getSystemService(UserManager.class);
+        doReturn(true).when(um).isSameProfileGroup(any(UserHandle.class),
+                any(UserHandle.class));
+        doReturn(true).when(um).isSameProfileGroup(anyInt(), anyInt());
+
         mTelecomSystem.getPhoneAccountRegistrar().setUserSelectedOutgoingPhoneAccount(
                 mPhoneAccountA0.getAccountHandle(), Process.myUserHandle());
     }
 
     private void setupInCallServices() throws Exception {
-        mComponentContextFixture.putResource(
-                com.android.internal.R.string.config_defaultDialer,
+        int mockResourceId = Resources.getSystem().getIdentifier("config_defaultDialer", "string",
+                "android");
+        mComponentContextFixture.putResource(mockResourceId,
                 mInCallServiceComponentNameX.getPackageName());
         mComponentContextFixture.putResource(
                 com.android.server.telecom.R.string.incall_default_class,
                 mInCallServiceComponentNameX.getClassName());
+
+        when(mSpyContext.getResources().getIdentifier(eq("incall_default_class"),
+                eq("string"), anyString()))
+                .thenReturn(com.android.server.telecom.R.string.incall_default_class);
 
         mInCallServiceFixtureX = new InCallServiceFixture();
         mInCallServiceFixtureY = new InCallServiceFixture();
@@ -664,36 +659,6 @@ public class TelecomSystemTest extends TelecomTestCase{
                 mInCallServiceFixtureX.getTestDouble(), SERVICE_X_UID);
         mComponentContextFixture.addInCallService(mInCallServiceComponentNameY,
                 mInCallServiceFixtureY.getTestDouble(), SERVICE_Y_UID);
-    }
-
-    /**
-     * Helper method for setting up the fake audio service.
-     * Calls to the fake audio service need to toggle the return
-     * value of AudioManager#isMicrophoneMute.
-     * @return mock of IAudioService
-     */
-    private IAudioService setupAudioService() {
-        IAudioService audioService = mock(IAudioService.class);
-
-        final AudioManager fakeAudioManager =
-                (AudioManager) mComponentContextFixture.getTestDouble()
-                        .getApplicationContext().getSystemService(Context.AUDIO_SERVICE);
-
-        try {
-            doAnswer(new Answer() {
-                @Override
-                public Object answer(InvocationOnMock i) {
-                    Object[] args = i.getArguments();
-                    doReturn(args[0]).when(fakeAudioManager).isMicrophoneMute();
-                    return null;
-                }
-            }).when(audioService).setMicrophoneMute(any(Boolean.class), any(String.class),
-                    any(Integer.class), nullable(String.class));
-
-        } catch (android.os.RemoteException e) {
-            // Do nothing, leave the faked microphone state as-is
-        }
-        return audioService;
     }
 
     protected String startOutgoingPhoneCallWithNoPhoneAccount(String number,
@@ -828,8 +793,9 @@ public class TelecomSystemTest extends TelecomTestCase{
 
         final UserHandle userHandle = initiatingUser;
         Context localAppContext = mComponentContextFixture.getTestDouble().getApplicationContext();
-        new UserCallIntentProcessor(localAppContext, userHandle, mFeatureFlags).processIntent(
-                actionCallIntent, null, false, true /* hasCallAppOp*/, false /* isLocal */);
+        new UserCallIntentProcessor(localAppContext, userHandle, TELECOM_UI_PACKAGE_NAME)
+                .processIntent(actionCallIntent, null, false,
+                        true /* hasCallAppOp*/, false /* isLocal */);
         // Wait for handler to start CallerInfo lookup.
         waitForHandlerAction(new Handler(Looper.getMainLooper()), TEST_TIMEOUT);
         // Send the CallerInfo lookup reply.
@@ -1115,8 +1081,10 @@ public class TelecomSystemTest extends TelecomTestCase{
         when(mClockProxy.elapsedRealtime()).thenReturn(TEST_CONNECT_ELAPSED_TIME);
         connectionServiceFixture.sendSetActive(ids.mConnectionId);
         if (phoneAccountHandle != mPhoneAccountSelfManaged.getAccountHandle()) {
-            assertEquals(Call.STATE_ACTIVE, mInCallServiceFixtureX.getCall(ids.mCallId).getState());
-            assertEquals(Call.STATE_ACTIVE, mInCallServiceFixtureY.getCall(ids.mCallId).getState());
+            TelecomSystemTest.assertTrueWithTimeout(v -> mInCallServiceFixtureX
+                    .getCall(ids.mCallId).getState() == Call.STATE_ACTIVE);
+            TelecomSystemTest.assertTrueWithTimeout(v -> mInCallServiceFixtureY
+                    .getCall(ids.mCallId).getState() == Call.STATE_ACTIVE);
 
             if ((mInCallServiceFixtureX.getCall(ids.mCallId).getProperties() &
                     Call.Details.PROPERTY_IS_EXTERNAL_CALL) == 0) {
@@ -1173,8 +1141,10 @@ public class TelecomSystemTest extends TelecomTestCase{
         connectionServiceFixture.sendSetActive(ids.mConnectionId);
 
         if (phoneAccountHandle != mPhoneAccountSelfManaged.getAccountHandle()) {
-            assertEquals(Call.STATE_ACTIVE, mInCallServiceFixtureX.getCall(ids.mCallId).getState());
-            assertEquals(Call.STATE_ACTIVE, mInCallServiceFixtureY.getCall(ids.mCallId).getState());
+            TelecomSystemTest.assertTrueWithTimeout(v -> mInCallServiceFixtureX
+                    .getCall(ids.mCallId).getState() == Call.STATE_ACTIVE);
+            TelecomSystemTest.assertTrueWithTimeout(v -> mInCallServiceFixtureY
+                    .getCall(ids.mCallId).getState() == Call.STATE_ACTIVE);
 
             if ((mInCallServiceFixtureX.getCall(ids.mCallId).getProperties() &
                     Call.Details.PROPERTY_IS_EXTERNAL_CALL) == 0) {

@@ -16,6 +16,7 @@
 
 package com.android.server.telecom;
 
+import android.annotation.SuppressLint;
 import android.content.pm.PackageManager;
 import android.telecom.Log;
 import android.telephony.PhoneNumberUtils;
@@ -30,6 +31,8 @@ import com.android.internal.annotations.VisibleForTesting;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Send a {@link TelephonyManager#ACTION_PHONE_STATE_CHANGED} broadcast when the call state
@@ -39,8 +42,16 @@ public final class PhoneStateBroadcaster extends CallsManagerListenerBase {
 
     private final CallsManager mCallsManager;
     private final TelephonyRegistryManager mRegistry;
+    private final ExecutorService mExecutor = Executors.newSingleThreadExecutor();
     private int mCurrentState = TelephonyManager.CALL_STATE_IDLE;
+    // TODO(b/469251875): This constant is hidden in SubscriptionManager.
+    // Redefined locally to remove hidden API dependency.
+    private static final int DEFAULT_PHONE_INDEX = Integer.MAX_VALUE;
 
+    /* TODO: b/478043076 - Remove SuppressLint once the API is finalized.
+     * And update the SDK check to the final version number.
+     */
+    @SuppressLint("NewApi")
     public PhoneStateBroadcaster(CallsManager callsManager) {
         mCallsManager = callsManager;
         mRegistry = callsManager.getContext().getSystemService(TelephonyRegistryManager.class);
@@ -109,6 +120,10 @@ public final class PhoneStateBroadcaster extends CallsManagerListenerBase {
         return mCurrentState;
     }
 
+    /* TODO: b/478043076 - Remove SuppressLint once the API is finalized.
+     * And update the SDK check to the final version number.
+     */
+    @SuppressLint("NewApi")
     private void sendPhoneStateChangedBroadcast(Call call, int phoneState) {
         if (phoneState == mCurrentState) {
             return;
@@ -123,12 +138,25 @@ public final class PhoneStateBroadcaster extends CallsManagerListenerBase {
             callHandle = call.getHandle().getSchemeSpecificPart();
         }
 
-        if (mRegistry != null) {
-            mRegistry.notifyCallStateChangedForAllSubscriptions(phoneState, callHandle);
-            Log.i(this, "Broadcasted state change: %s", mCurrentState);
-        }
+        final String finalCallHandle = callHandle;
+        mExecutor.execute(() -> {
+            if (mRegistry != null) {
+                try {
+                    mRegistry.notifyCallStateChangedForAllSubscriptions(
+                            phoneState, finalCallHandle);
+                    Log.i(this, "Broadcasted state change: %s", mCurrentState);
+                } catch (Exception e) {
+                    Log.i(this, "Exception thrown while notifying call state change"
+                            + "for subscriptions");
+                }
+            }
+        });
     }
 
+    /* TODO: b/478043076 - Remove SuppressLint once the API is finalized.
+     * And update the SDK check to the final version number.
+     */
+    @SuppressLint("NewApi")
     private void sendOutgoingEmergencyCallEvent(Call call) {
         TelephonyManager tm = mCallsManager.getContext().getSystemService(TelephonyManager.class);
         String strippedNumber =
@@ -154,7 +182,7 @@ public final class PhoneStateBroadcaster extends CallsManagerListenerBase {
                 subscriptionId = tm.getSubscriptionId(call.getTargetPhoneAccount());
                 SubscriptionManager subscriptionManager =
                         mCallsManager.getContext().getSystemService(SubscriptionManager.class);
-                simSlotIndex = SubscriptionManager.DEFAULT_PHONE_INDEX;
+                simSlotIndex = DEFAULT_PHONE_INDEX;
                 if (subscriptionManager != null) {
                     SubscriptionInfo subInfo =
                             subscriptionManager.getActiveSubscriptionInfo(subscriptionId);

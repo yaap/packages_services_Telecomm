@@ -37,14 +37,21 @@ import com.android.server.telecom.flags.FeatureFlags;
  * changes.
  */
 public class DtmfLocalTonePlayer {
+    @VisibleForTesting
+    public static final int DEFAULT_VOLUME = 80;
     public static class ToneGeneratorProxy {
         /** Generator used to actually play the tone. */
         private ToneGenerator mToneGenerator;
 
         public void create() {
+            create(DEFAULT_VOLUME);
+        }
+
+        public void create(int volume) {
             if (mToneGenerator == null) {
                 try {
-                    mToneGenerator = new ToneGenerator(AudioManager.STREAM_DTMF, 80);
+                    Log.d(this, "Init ToneGenerator volume：" + volume);
+                    mToneGenerator = new ToneGenerator(AudioManager.STREAM_DTMF, volume);
                 } catch (RuntimeException e) {
                     Log.e(this, e, "Error creating local tone generator.");
                     mToneGenerator = null;
@@ -91,7 +98,7 @@ public class DtmfLocalTonePlayer {
 
                 switch (msg.what) {
                     case EVENT_START_SESSION:
-                        mToneGeneratorProxy.create();
+                        mToneGeneratorProxy.create(mVolume);
                         break;
                     case EVENT_END_SESSION:
                         mToneGeneratorProxy.release();
@@ -103,7 +110,7 @@ public class DtmfLocalTonePlayer {
                         } else {
                             Log.d(this, "starting local tone: %c.", c);
                             int tone = getMappedTone(c);
-                            if (tone != ToneGenerator.TONE_UNKNOWN) {
+                            if (tone != TONE_UNKNOWN) {
                                 mToneGeneratorProxy.startTone(tone, -1 /* toneDuration */);
                             }
                         }
@@ -130,6 +137,9 @@ public class DtmfLocalTonePlayer {
      * Message codes to be used for creating and deleting ToneGenerator object in the tonegenerator
      * thread, as well as for actually playing the tones.
      */
+    // Redefined locally to remove hidden API dependency.
+    // Default value for an unknown or unspecified tone.
+    private static final int TONE_UNKNOWN = -1;
     private static final int EVENT_START_SESSION = 1;
     private static final int EVENT_END_SESSION = 2;
     private static final int EVENT_PLAY_TONE = 3;
@@ -144,6 +154,11 @@ public class DtmfLocalTonePlayer {
     public DtmfLocalTonePlayer(ToneGeneratorProxy toneGeneratorProxy, FeatureFlags f) {
         mToneGeneratorProxy = toneGeneratorProxy;
         mFeatureFlags = f;
+    }
+    private int mVolume = DEFAULT_VOLUME;
+    public DtmfLocalTonePlayer(ToneGeneratorProxy toneGeneratorProxy, int volume, FeatureFlags f) {
+        this(toneGeneratorProxy,f);
+        mVolume = volume;
     }
 
     public void onForegroundCallChanged(Call oldForegroundCall, Call newForegroundCall) {
@@ -193,16 +208,9 @@ public class DtmfLocalTonePlayer {
         }
         final Context context = call.getContext();
         final boolean areLocalTonesEnabled;
-        if (context.getResources().getBoolean(R.bool.allow_local_dtmf_tones)) {
-            if (mFeatureFlags.resolveHiddenDependenciesTwo()) {
-                areLocalTonesEnabled = Settings.System.getInt(context.getContentResolver(),
-                        Settings.System.DTMF_TONE_WHEN_DIALING, 1) == 1;
-
-            } else {
-                areLocalTonesEnabled = Settings.System.getIntForUser(
-                        context.getContentResolver(), Settings.System.DTMF_TONE_WHEN_DIALING, 1,
-                        UserUtil.getUserIdFromContext(context, mFeatureFlags)) == 1;
-            }
+        if (TelecomResourceId.getBoolean(context, "allow_local_dtmf_tones")) {
+            areLocalTonesEnabled = Settings.System.getInt(context.getContentResolver(),
+                    Settings.System.DTMF_TONE_WHEN_DIALING, 1) == 1;
         } else {
             areLocalTonesEnabled = false;
         }
@@ -255,6 +263,6 @@ public class DtmfLocalTonePlayer {
         } else if (digit == '*') {
             return ToneGenerator.TONE_DTMF_S;
         }
-        return ToneGenerator.TONE_UNKNOWN;
+        return TONE_UNKNOWN;
     }
 }

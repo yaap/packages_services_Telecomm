@@ -28,13 +28,16 @@ import android.sysprop.TelephonyProperties;
 import android.telecom.Log;
 import android.telecom.PhoneAccount;
 import android.telecom.PhoneAccountHandle;
+import android.telecom.TelecomManager;
 import android.telephony.TelephonyManager;
 import android.text.TextUtils;
 
 import com.android.internal.telecom.ITelecomService;
 import com.android.modules.utils.BasicShellCommandHandler;
 
+import java.time.Duration;
 import java.util.Arrays;
+import java.util.List;
 import java.util.stream.Collectors;
 
 /**
@@ -93,6 +96,8 @@ public class TelecomShellCommand extends BasicShellCommandHandler {
      * Command used to emit a distinct "mark" in the logs.
      */
     private static final String COMMAND_LOG_MARK = "log-mark";
+    private static final String COMMAND_SET_LOCAL_VOICEMAIL_SERVICE = "set-local-voicemail-service";
+    private static final String COMMAND_SET_LOCAL_VOICEMAIL_TIMEOUT = "set-local-voicemail-timeout";
 
     private final Context mContext;
     private final ITelecomService mTelecomService;
@@ -202,6 +207,12 @@ public class TelecomShellCommand extends BasicShellCommandHandler {
                 case COMMAND_WAIT_FOR_AUDIO_ACTIVE_COMPLETION:
                     mTelecomService.waitForAudioToUpdate(true);
                     break;
+                case COMMAND_SET_LOCAL_VOICEMAIL_SERVICE:
+                    runSetLocalVoicemailService();
+                    break;
+                case COMMAND_SET_LOCAL_VOICEMAIL_TIMEOUT:
+                    runSetLocalVoicemailTimeout();
+                    break;
                 default:
                     return handleDefaultCommands(command);
             }
@@ -282,6 +293,8 @@ public class TelecomShellCommand extends BasicShellCommandHandler {
                 + "non-ui-InCallService in InCallController to determine if it is bound \n"
                 + "telecom set-metrics-test-enabled: Enable the metrics test mode.\n"
                 + "telecom set-metrics-test-disabled: Disable the metrics test mode.\n"
+                + "telecom set-local-voicemail-service: Override the local voicemail service to the"
+                + " specified package. To remove the override, send \"default\"\n"
         );
     }
     private void runSetPhoneAccountEnabled(boolean enabled) throws RemoteException {
@@ -473,6 +486,42 @@ public class TelecomShellCommand extends BasicShellCommandHandler {
 
     }
 
+    private void runSetLocalVoicemailService() throws RemoteException {
+        String packageName = getNextArg();
+        if ("default".equals(packageName)) packageName = null;
+        mTelecomService.setTestLocalVoicemailService(packageName);
+        getOutPrintWriter().println("Success - changed local vm service to " + packageName);
+    }
+
+    private void runSetLocalVoicemailTimeout() throws RemoteException {
+        String timeout = getNextArg();
+        Log.i(this, "runSetLocalVoicemailTimeout %s", timeout);
+        Duration timeoutSeconds;
+        if ("disabled".equals(timeout)) {
+            timeoutSeconds = null;
+        } else {
+            try {
+                timeoutSeconds = Duration.ofSeconds(Integer.parseInt(timeout));
+            } catch (NumberFormatException nfe) {
+                timeoutSeconds = null;
+            }
+        }
+        try {
+            TelecomManager mgr = mContext.getSystemService(TelecomManager.class);
+            List<PhoneAccountHandle> handles = mgr.getCallCapablePhoneAccounts();
+            for (PhoneAccountHandle h : handles) {
+                if (timeoutSeconds == null) {
+                    mgr.disableLocalVoicemail(h);
+                } else {
+                    mgr.enableLocalVoicemail(h, timeoutSeconds);
+                }
+            }
+            getOutPrintWriter().println("Success - changed local vm timeout to " + timeoutSeconds);
+        } catch (Exception e) {
+            Log.i(this, "runSetLocalVoicemailTimeout failed.");
+        }
+    }
+
     private void runLogMark() throws RemoteException {
         String message = Arrays.stream(peekRemainingArgs()).collect(Collectors.joining(" "));
         mTelecomService.requestLogMark(message);
@@ -483,15 +532,7 @@ public class TelecomShellCommand extends BasicShellCommandHandler {
             return null;
         }
         final String userSnInStr = getNextArgRequired();
-        UserHandle userHandle;
-        try {
-            final int userSn = Integer.parseInt(userSnInStr);
-            userHandle = UserHandle.of(getUserManager().getUserHandle(userSn));
-        } catch (NumberFormatException ex) {
-            Log.w(this, "getPhoneAccountHandleFromArgs - invalid user %s", userSnInStr);
-            throw new IllegalArgumentException ("Invalid user serial number " + userSnInStr);
-        }
-        return userHandle;
+        return parseUserHandle(userSnInStr);
     }
 
     private PhoneAccountHandle getPhoneAccountHandleFromArgs() throws RemoteException {
@@ -501,15 +542,17 @@ public class TelecomShellCommand extends BasicShellCommandHandler {
         final ComponentName component = parseComponentName(getNextArgRequired());
         final String accountId = getNextArgRequired();
         final String userSnInStr = getNextArgRequired();
-        UserHandle userHandle;
+        return new PhoneAccountHandle(component, accountId, parseUserHandle(userSnInStr));
+    }
+
+    private UserHandle parseUserHandle(String userSnInStr) {
         try {
             final int userSn = Integer.parseInt(userSnInStr);
-            userHandle = UserHandle.of(getUserManager().getUserHandle(userSn));
+            return getUserManager().getUserForSerialNumber((long) userSn);
         } catch (NumberFormatException ex) {
-            Log.w(this, "getPhoneAccountHandleFromArgs - invalid user %s", userSnInStr);
+            Log.w(this, "parseUserHandle - invalid user %s", userSnInStr);
             throw new IllegalArgumentException ("Invalid user serial number " + userSnInStr);
         }
-        return new PhoneAccountHandle(component, accountId, userHandle);
     }
 
     private boolean callerIsRoot() {

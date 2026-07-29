@@ -113,22 +113,14 @@ public class AsyncRingtonePlayer {
         args.arg3 = Log.createSubsession();
         args.arg4 = prepareRingingReadyLatch(isHfpDeviceConnected);
 
-        if (mFeatureFlags.resolveHiddenDependenciesTwo()) {
-            postTask(() -> handlePlayExecutor(args));
-        } else {
-            postMessage(EVENT_PLAY, true /* shouldCreateHandler */, args);
-        }
+        postTask(() -> handlePlayExecutor(args));
     }
 
     /** Stops playing the ringtone. */
     public void stop() {
         Log.d(this, "Posting stop.");
         mIsPlaying = false;
-        if (mFeatureFlags.resolveHiddenDependenciesTwo()) {
-            postTask(this::handleStopExecutor);
-        } else {
-            postMessage(EVENT_STOP, false /* shouldCreateHandler */, null);
-        }
+        postTask(this::handleStopExecutor);
         // Clear any pending ringing latches so that we do not have to wait for its timeout to pass
         // before calling stop.
         clearPendingRingingLatches();
@@ -227,19 +219,17 @@ public class AsyncRingtonePlayer {
         HandlerThread thread = new HandlerThread("ringtone-player");
         thread.start();
 
-        return new Handler(thread.getLooper(), null /*callback*/, true /*async*/) {
-            @Override
-            public void handleMessage(Message msg) {
-                switch (msg.what) {
-                    case EVENT_PLAY:
-                        handlePlay((SomeArgs) msg.obj);
-                        break;
-                    case EVENT_STOP:
-                        handleStop();
-                        break;
-                }
+        return Handler.createAsync(thread.getLooper(), msg -> {
+            switch (msg.what) {
+                case EVENT_PLAY:
+                    handlePlay((SomeArgs) msg.obj);
+                    break;
+                case EVENT_STOP:
+                    handleStop();
+                    break;
             }
-        };
+            return true;
+        });
     }
 
     /**

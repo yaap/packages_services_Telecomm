@@ -20,27 +20,22 @@ import android.annotation.Nullable;
 import android.content.ComponentName;
 import android.content.ContentResolver;
 import android.content.Context;
+import android.content.res.Resources;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.drawable.Drawable;
-import android.location.Country;
-import android.location.CountryDetector;
 import android.net.Uri;
 import android.provider.ContactsContract.CommonDataKinds.Phone;
 import android.provider.ContactsContract.Contacts;
 import android.provider.ContactsContract.Data;
 import android.provider.ContactsContract.PhoneLookup;
 import android.provider.ContactsContract.RawContacts;
-import android.telecom.Log;
 import android.telephony.PhoneNumberUtils;
 import android.telephony.SubscriptionManager;
 import android.telephony.TelephonyManager;
 import android.text.TextUtils;
+import android.util.Log;
 
-import com.android.i18n.phonenumbers.NumberParseException;
-import com.android.i18n.phonenumbers.PhoneNumberUtil;
-import com.android.i18n.phonenumbers.Phonenumber.PhoneNumber;
-import com.android.i18n.phonenumbers.geocoding.PhoneNumberOfflineGeocoder;
 import com.android.internal.annotations.VisibleForTesting;
 
 import java.util.Locale;
@@ -53,9 +48,8 @@ public class CallerInfo {
     public static final long USER_TYPE_CURRENT = 0;
     public static final long USER_TYPE_WORK = 1;
     private static final String TAG = "CallerInfo";
-    private static final boolean VDBG = Log.VERBOSE;
+    private static final boolean VDBG = android.util.Log.isLoggable(TAG, Log.VERBOSE);
     public String normalizedNumber;
-    public String geoDescription;
     public String cnapName;
     public int numberPresentation;
     public int namePresentation;
@@ -201,9 +195,8 @@ public class CallerInfo {
                     if (typeColumnIndex != -1) {
                         info.numberType = cursor.getInt(typeColumnIndex);
                         info.numberLabel = cursor.getString(columnIndex);
-                        info.phoneLabel = Phone.getDisplayLabel(context,
-                                info.numberType, info.numberLabel)
-                            .toString();
+                        info.phoneLabel = Phone.getTypeLabel(context.getResources(),
+                                info.numberType, info.numberLabel).toString();
                     }
                 }
 
@@ -304,7 +297,7 @@ public class CallerInfo {
                 info = getCallerInfo(context, contactRef,
                     cr.query(contactRef, null, null, null, null));
             } catch (RuntimeException re) {
-                Log.e(TAG, re, "Error getting caller info.");
+                Log.e(TAG, "Error getting caller info." + re.toString());
             }
         }
         return info;
@@ -349,11 +342,19 @@ public class CallerInfo {
         // Change the callerInfo number ONLY if it is an emergency number
         // or if it is the voicemail number.  If it is either, take a
         // shortcut and skip the query.
-        TelephonyManager tm = context.getSystemService(TelephonyManager.class);
-        if (tm.isEmergencyNumber(number)) {
-            return new CallerInfo().markAsEmergency(context);
-        } else if (PhoneNumberUtils.isVoiceMailNumber(null, subId, number)) {
-            return new CallerInfo().markAsVoiceMail(context, subId);
+        try {
+            TelephonyManager tm = context.getSystemService(TelephonyManager.class);
+            if (tm.isEmergencyNumber(number)) {
+                return new CallerInfo().markAsEmergency(context);
+            } else if (PhoneNumberUtils.isVoiceMailNumber(null, subId, number)) {
+                return new CallerInfo().markAsVoiceMail(context, subId);
+            }
+        } catch (UnsupportedOperationException | IllegalStateException ex) {
+            // Ignore; Telephony is not available or failed, so we cannot perform an emergency
+            // number check.
+        } catch (RuntimeException ex) {
+            // Some other runtime exception occurred; don't crash but log.
+            Log.e(TAG, "Error getting caller info.", ex);
         }
 
         Uri contactUri = Uri.withAppendedPath(PhoneLookup.ENTERPRISE_CONTENT_FILTER_URI,
@@ -488,64 +489,15 @@ public class CallerInfo {
     }
 
     /**
-     * @return a geographical description string for the specified number.
-     * @see com.android.i18n.phonenumbers.PhoneNumberOfflineGeocoder
-     */
-    public static String getGeoDescription(Context context, String number) {
-        if (VDBG) {
-            Log.v(TAG, "getGeoDescription('" + number + "')...");
-        }
-
-        if (TextUtils.isEmpty(number)) {
-            return null;
-        }
-
-        PhoneNumberUtil util = PhoneNumberUtil.getInstance();
-        PhoneNumberOfflineGeocoder geocoder = PhoneNumberOfflineGeocoder.getInstance();
-
-        Locale locale = context.getResources().getConfiguration().locale;
-        String countryIso = getCurrentCountryIso(context, locale);
-        PhoneNumber pn = null;
-        try {
-            if (VDBG) {
-                Log.v(TAG, "parsing '" + number
-                    + "' for countryIso '" + countryIso + "'...");
-            }
-            pn = util.parse(number, countryIso);
-            if (VDBG) {
-                Log.v(TAG, "- parsed number: " + pn);
-            }
-        } catch (NumberParseException e) {
-            Log.w(TAG, "getGeoDescription: NumberParseException for incoming number '"
-                + Log.pii(number) + "'");
-        }
-
-        if (pn != null) {
-            String description = geocoder.getDescriptionForNumber(pn, locale);
-            if (VDBG) {
-                Log.v(TAG, "- got description: '" + description + "'");
-            }
-            return description;
-        } else {
-            return null;
-        }
-    }
-
-    /**
      * @return The ISO 3166-1 two letters country code of the country the user is in.
      */
     private static String getCurrentCountryIso(Context context, Locale locale) {
         String countryIso = null;
-        CountryDetector detector = context.getSystemService(CountryDetector.class);
-        if (detector != null) {
-            Country country = detector.detectCountry();
-            if (country != null) {
-                countryIso = country.getCountryIso();
-            } else {
-                Log.e(TAG, new Exception(), "CountryDetector.detectCountry() returned null.");
-            }
+        TelephonyManager tm = context.getSystemService(TelephonyManager.class);
+        if (tm != null) {
+            countryIso = tm.getNetworkCountryIso().toUpperCase();
         }
-        if (countryIso == null) {
+        if (countryIso == null || countryIso.isEmpty()) {
             countryIso = locale.getCountry();
             Log.w(TAG, "No CountryDetector; falling back to countryIso based on locale: "
                 + countryIso);
@@ -637,9 +589,13 @@ public class CallerInfo {
     // 'Emergency Number' and let the UI make the decision about what
     // should be displayed.
     /* package */ CallerInfo markAsEmergency(Context context) {
-        phoneNumber = context.getString(
-            com.android.internal.R.string.emergency_call_dialog_number_for_display);
-        photoResource = com.android.internal.R.drawable.picture_emergency;
+        int resourceId = Resources.getSystem().getIdentifier(
+                "emergency_call_dialog_number_for_display", "string", "android");
+        if (resourceId != 0) {
+            phoneNumber = context.getResources().getString(resourceId);
+        }
+        photoResource = Resources.getSystem().getIdentifier("picture_emergency", "drawable",
+                "android");
         mIsEmergency = true;
         return this;
     }
@@ -657,28 +613,12 @@ public class CallerInfo {
             // permission to retrieve VM number and would not call
             // this method.
             // Leave phoneNumber untouched.
-            Log.e(TAG, se, "Cannot access VoiceMail.");
+            Log.e(TAG, "Cannot access VoiceMail.");
         }
         // TODO: There is no voicemail picture?
         // FIXME: FIND ANOTHER ICON
         // photoResource = android.R.drawable.badge_voicemail;
         return this;
-    }
-
-    /**
-     * Updates this CallerInfo's geoDescription field, based on the raw phone number in the
-     * phoneNumber field.
-     *
-     * (Note that the various getCallerInfo() methods do *not* set the geoDescription automatically;
-     * you need to call this method explicitly to get it.)
-     *
-     * @param context the context used to look up the current locale / country
-     * @param fallbackNumber if this CallerInfo's phoneNumber field is empty, this specifies a
-     *     fallback number to use instead.
-     */
-    public void updateGeoDescription(Context context, String fallbackNumber) {
-        String number = TextUtils.isEmpty(phoneNumber) ? fallbackNumber : phoneNumber;
-        geoDescription = getGeoDescription(context, number);
     }
 
     /**
@@ -695,7 +635,6 @@ public class CallerInfo {
                 + "\nname: " + name
                 + "\nphoneNumber: " + phoneNumber
                 + "\nnormalizedNumber: " + normalizedNumber
-                + "\ngeoDescription: " + geoDescription
                 + "\ncnapName: " + cnapName
                 + "\nnumberPresentation: " + numberPresentation
                 + "\nnamePresentation: " + namePresentation

@@ -92,17 +92,19 @@ public class CallEndpointController extends CallsManagerListenerBase {
 
     public void requestCallEndpointChange(CallEndpoint endpoint, ResultReceiver callback) {
         Log.i(this, "requestCallEndpointChange %s", endpoint);
-        int route = mTypeToRouteMap.get(endpoint.getEndpointType());
+        int route = getRoute(endpoint);
         String bluetoothAddress = getBluetoothAddress(endpoint);
 
         if (findMatchingTypeEndpoint(endpoint.getEndpointType()) == null ||
                 (route == CallAudioState.ROUTE_BLUETOOTH && bluetoothAddress == null)) {
+            mCallsManager.getMetricsController().getCallEndpointStats().onException(false);
             callback.send(CallEndpoint.ENDPOINT_OPERATION_FAILED,
                     getErrorResult(RESULT_ENDPOINT_DOES_NOT_EXIST));
             return;
         }
 
         if (isCurrentEndpointRequestedEndpoint(route, bluetoothAddress)) {
+            mCallsManager.getMetricsController().getCallEndpointStats().onException(true);
             callback.send(CallEndpoint.ENDPOINT_OPERATION_SUCCESS, new Bundle());
             return;
         }
@@ -199,6 +201,8 @@ public class CallEndpointController extends CallsManagerListenerBase {
         }
         mCallsManager.updateCallEndpoint(mActiveCallEndpoint);
 
+        mCallsManager.getMetricsController().getCallEndpointStats().onNotified(
+                getRoute(mActiveCallEndpoint), getBluetoothAddress(mActiveCallEndpoint));
         List<Call> calls = new ArrayList<>(mCallsManager.getTrackedCalls());
         for (Call call : calls) {
             onCallEndpointChangedOrCache(call);
@@ -318,7 +322,16 @@ public class CallEndpointController extends CallsManagerListenerBase {
         return null;
     }
 
-    private CallEndpoint findMatchingBluetoothEndpoint(BluetoothDevice device) {
+    public CallEndpoint findMatchingRouteEndpoint(int targetRoute) {
+        for (CallEndpoint endpoint : mAvailableCallEndpoints) {
+            if (endpoint.getEndpointType() == mRouteToTypeMap.get(targetRoute)) {
+                return endpoint;
+            }
+        }
+        return null;
+    }
+
+    public CallEndpoint findMatchingBluetoothEndpoint(BluetoothDevice device) {
         final String targetAddress = device.getAddress();
         if (targetAddress != null) {
             for (CallEndpoint endpoint : mAvailableCallEndpoints) {
@@ -379,17 +392,23 @@ public class CallEndpointController extends CallsManagerListenerBase {
     private CharSequence getEndpointName(int endpointType) {
         switch (endpointType) {
             case CallEndpoint.TYPE_EARPIECE:
-                return mContext.getText(R.string.callendpoint_name_earpiece);
+                return com.android.server.telecom.TelecomResourceId.getText(mContext,
+                        "callendpoint_name_earpiece");
             case CallEndpoint.TYPE_BLUETOOTH:
-                return mContext.getText(R.string.callendpoint_name_bluetooth);
+                return com.android.server.telecom.TelecomResourceId.getText(mContext,
+                        "callendpoint_name_bluetooth");
             case CallEndpoint.TYPE_WIRED_HEADSET:
-                return mContext.getText(R.string.callendpoint_name_wiredheadset);
+                return com.android.server.telecom.TelecomResourceId.getText(mContext,
+                        "callendpoint_name_wiredheadset");
             case CallEndpoint.TYPE_SPEAKER:
-                return mContext.getText(R.string.callendpoint_name_speaker);
+                return com.android.server.telecom.TelecomResourceId.getText(mContext,
+                        "callendpoint_name_speaker");
             case CallEndpoint.TYPE_STREAMING:
-                return mContext.getText(R.string.callendpoint_name_streaming);
+                return com.android.server.telecom.TelecomResourceId.getText(mContext,
+                        "callendpoint_name_streaming");
             default:
-                return mContext.getText(R.string.callendpoint_name_unknown);
+                return com.android.server.telecom.TelecomResourceId.getText(mContext,
+                        "callendpoint_name_unknown");
         }
     }
 
@@ -425,5 +444,9 @@ public class CallEndpointController extends CallsManagerListenerBase {
             notifyCallEndpointChange();
             notifyMuteStateChange(newState.isMuted());
         }
+    }
+
+    int getRoute(CallEndpoint endpoint) {
+        return mTypeToRouteMap.getOrDefault(endpoint.getEndpointType(), 0);
     }
 }

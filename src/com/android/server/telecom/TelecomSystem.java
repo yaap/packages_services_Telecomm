@@ -24,7 +24,6 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.ServiceConnection;
-import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.net.Uri;
 import android.os.BugreportManager;
@@ -33,20 +32,22 @@ import android.os.Looper;
 import android.os.UserHandle;
 import android.telecom.Log;
 import android.telecom.PhoneAccountHandle;
-import android.telephony.AnomalyReporter;
+
+import android.telecom.TelecomManager;
 import android.telephony.TelephonyManager;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 
 import com.android.internal.annotations.VisibleForTesting;
-import com.android.server.telecom.CallAudioManager.AudioServiceFactory;
+import com.android.internal.telephony.flags.Flags;
 import com.android.server.telecom.DefaultDialerCache.DefaultDialerManagerAdapter;
 import com.android.server.telecom.bluetooth.BluetoothDeviceManager;
 import com.android.server.telecom.bluetooth.BluetoothRouteManager;
 import com.android.server.telecom.bluetooth.BluetoothStateReceiver;
 import com.android.server.telecom.callfiltering.BlockedNumbersAdapter;
 import com.android.server.telecom.callfiltering.IncomingCallFilterGraph;
+import com.android.server.telecom.components.TelecomBroadcastReceiver;
 import com.android.server.telecom.components.UserCallIntentProcessor;
 import com.android.server.telecom.components.UserCallIntentProcessorFactory;
 import com.android.server.telecom.flags.FeatureFlags;
@@ -72,32 +73,22 @@ import java.util.concurrent.ScheduledExecutorService;
 public class TelecomSystem {
 
     /**
-     * This interface is implemented by system-instantiated components (e.g., Services and
-     * Activity-s) that wish to use the TelecomSystem but would like to be testable. Such a
-     * component should implement the getTelecomSystem() method to return the global singleton,
-     * and use its own method. Tests can subclass the component to return a non-singleton.
-     *
-     * A refactoring goal for Telecom is to limit use of the TelecomSystem singleton to those
-     * system-instantiated components, and have all other parts of the system just take all their
-     * dependencies as explicit arguments to their constructor or other methods.
-     */
-    public interface Component {
-        TelecomSystem getTelecomSystem();
-    }
-
-
-    /**
      * Tagging interface for the object used for synchronizing multi-threaded operations in
      * the Telecom system.
      */
     public interface SyncRoot {
     }
 
+    /**
+     * Broadcast sent when the user is starting.
+     */
+    private static final String ACTION_USER_STARTING = "android.intent.action.USER_STARTING";
+
     private static final IntentFilter USER_SWITCHED_FILTER =
             new IntentFilter(Intent.ACTION_USER_SWITCHED);
 
     private static final IntentFilter USER_STARTING_FILTER =
-            new IntentFilter(Intent.ACTION_USER_STARTING);
+            new IntentFilter(ACTION_USER_STARTING);
 
     private static final IntentFilter BOOT_COMPLETE_FILTER =
             new IntentFilter(Intent.ACTION_BOOT_COMPLETED);
@@ -105,7 +96,7 @@ public class TelecomSystem {
     /** Intent filter for dialer secret codes. */
     private static final IntentFilter DIALER_SECRET_CODE_FILTER;
 
-    /**
+    /*
      * Initializes the dialer secret code intent filter.  Setup to handle the various secret codes
      * which can be dialed (e.g. in format *#*#code#*#*) to trigger various behavior in Telecom.
      */
@@ -119,8 +110,6 @@ public class TelecomSystem {
                 .addDataAuthority(DialerCodeReceiver.TELECOM_SECRET_CODE_DEBUG_OFF, null);
         DIALER_SECRET_CODE_FILTER
                 .addDataAuthority(DialerCodeReceiver.TELECOM_SECRET_CODE_MARK, null);
-        DIALER_SECRET_CODE_FILTER
-                .addDataAuthority(DialerCodeReceiver.TELECOM_SECRET_CODE_MENU, null);
 
         USER_SWITCHED_FILTER.setPriority(IntentFilter.SYSTEM_HIGH_PRIORITY);
         USER_STARTING_FILTER.setPriority(IntentFilter.SYSTEM_HIGH_PRIORITY);
@@ -158,11 +147,7 @@ public class TelecomSystem {
                 synchronized (mLock) {
                     int userHandleId = intent.getIntExtra(Intent.EXTRA_USER_HANDLE, 0);
                     UserHandle currentUserHandle;
-                    if (mFeatureFlags.resolveHiddenDependenciesTwo()) {
-                        currentUserHandle = UserHandle.of(userHandleId);
-                    } else {
-                        currentUserHandle = new UserHandle(userHandleId);
-                    }
+                    currentUserHandle = UserHandle.of(userHandleId);
                     Log.i(TelecomSystem.this, "ACTION_USER_SWITCHED: userHandle=%s",
                             currentUserHandle);
                     mPhoneAccountRegistrar.setCurrentUserHandle(currentUserHandle);
@@ -182,11 +167,7 @@ public class TelecomSystem {
                 synchronized (mLock) {
                     int userHandleId = intent.getIntExtra(Intent.EXTRA_USER_HANDLE, 0);
                     UserHandle addingUserHandle;
-                    if (mFeatureFlags.resolveHiddenDependenciesTwo()) {
-                        addingUserHandle = UserHandle.of(userHandleId);
-                    } else {
-                        addingUserHandle = new UserHandle(userHandleId);
-                    }
+                    addingUserHandle = UserHandle.of(userHandleId);
                     Log.i(TelecomSystem.this, "ACTION_USER_STARTING: userHandle=%s",
                             addingUserHandle);
                     mCallsManager.onUserStarting(addingUserHandle);
@@ -232,7 +213,6 @@ public class TelecomSystem {
             HeadsetMediaButtonFactory headsetMediaButtonFactory,
             ProximitySensorManagerFactory proximitySensorManagerFactory,
             InCallWakeLockControllerFactory inCallWakeLockControllerFactory,
-            AudioServiceFactory audioServiceFactory,
             ConnectionServiceFocusManager.ConnectionServiceFocusManagerFactory
                     connectionServiceFocusManagerFactory,
             Timeouts.Adapter timeoutsAdapter,
@@ -245,13 +225,14 @@ public class TelecomSystem {
             ClockProxy clockProxy,
             RoleManagerAdapter roleManagerAdapter,
             ContactsAsyncHelper.Factory contactsAsyncHelperFactory,
-            DeviceIdleControllerAdapter deviceIdleControllerAdapter,
             String sysUiPackageName,
+            String telecomUiPackageName,
             Ringer.AccessibilityManagerAdapter accessibilityManagerAdapter,
             Executor asyncTaskExecutor,
             Executor asyncCallAudioTaskExecutor,
             BlockedNumbersAdapter blockedNumbersAdapter,
             FeatureFlags featureFlags,
+            android.telecom.flags.FeatureFlags moduleFeatureFlags,
             com.android.internal.telephony.flags.FeatureFlags telephonyFlags,
             Looper looper,
             Ringer.VibratorAdapter vibratorAdapter) {
@@ -259,7 +240,7 @@ public class TelecomSystem {
         mFeatureFlags = featureFlags;
         LogUtils.initLogging(mContext);
         android.telecom.Log.setLock(mLock);
-        AnomalyReporter.initialize(mContext);
+        AnomalyReporterAdapterImpl.initialize(mContext);
         DefaultDialerManagerAdapter defaultDialerAdapter =
                 new DefaultDialerCache.DefaultDialerManagerAdapterImpl();
 
@@ -271,7 +252,8 @@ public class TelecomSystem {
         try {
             mPhoneAccountRegistrar = new PhoneAccountRegistrar(mContext, mLock, defaultDialerCache,
                     (packageName, userHandle) -> AppLabelProxy.Util.getAppLabel(mContext,
-                            userHandle, packageName, mFeatureFlags), null, mFeatureFlags);
+                            userHandle, packageName, mFeatureFlags), null, mFeatureFlags,
+                    new AnomalyReporterAdapterImpl(mContext));
 
             mContactsAsyncHelper = contactsAsyncHelperFactory.create(
                     new ContactsAsyncHelper.ContentResolverAdapter() {
@@ -286,9 +268,8 @@ public class TelecomSystem {
                     featureFlags);
             BluetoothRouteManager bluetoothRouteManager = new BluetoothRouteManager(
                     bluetoothDeviceManager);
-            BluetoothStateReceiver bluetoothStateReceiver = new BluetoothStateReceiver(
-                    bluetoothDeviceManager, featureFlags);
-            mContext.registerReceiver(bluetoothStateReceiver, BluetoothStateReceiver.INTENT_FILTER);
+            BluetoothStateReceiver bluetoothStateReceiver = new BluetoothStateReceiver(mContext,
+                    bluetoothDeviceManager);
 
             WiredHeadsetManager wiredHeadsetManager = new WiredHeadsetManager(mContext);
             SystemStateHelper systemStateHelper = new SystemStateHelper(mContext, mLock);
@@ -296,7 +277,6 @@ public class TelecomSystem {
             mMissedCallNotifier = missedCallNotifierImplFactory
                     .makeMissedCallNotifierImpl(mContext, mPhoneAccountRegistrar,
                             defaultDialerCache,
-                            deviceIdleControllerAdapter,
                             featureFlags);
             DisconnectedCallNotifier.Factory disconnectedCallNotifierFactory =
                     new DisconnectedCallNotifier.Default();
@@ -304,9 +284,6 @@ public class TelecomSystem {
             CallerInfoLookupHelper callerInfoLookupHelper =
                     new CallerInfoLookupHelper(context, callerInfoAsyncQueryFactory,
                             mContactsAsyncHelper, mLock);
-
-            EmergencyCallHelper emergencyCallHelper = new EmergencyCallHelper(mContext,
-                    defaultDialerCache, timeoutsAdapter, mFeatureFlags);
 
             InCallControllerFactory inCallControllerFactory = new InCallControllerFactory() {
                 @Override
@@ -316,9 +293,12 @@ public class TelecomSystem {
                         EmergencyCallHelper emergencyCallHelper) {
                     return new InCallController(context, lock, callsManager, systemStateProvider,
                             defaultDialerCache, timeoutsAdapter, emergencyCallHelper,
-                            new CarModeTracker(), clockProxy, featureFlags);
+                            new CarModeTracker(), clockProxy, telecomUiPackageName, featureFlags);
                 }
             };
+
+            EmergencyCallHelper emergencyCallHelper = new EmergencyCallHelper(mContext,
+                    defaultDialerCache, timeoutsAdapter, mFeatureFlags);
 
             CallEndpointControllerFactory callEndpointControllerFactory =
                     new CallEndpointControllerFactory() {
@@ -335,14 +315,9 @@ public class TelecomSystem {
                                 @Override
                                 public List<ResolveInfo> queryIntentServicesAsUser(
                                         @NonNull Intent intent, int flags, int userId) {
-                                    if (mFeatureFlags.resolveHiddenDependenciesTwo()) {
-                                        return UserUtil.getPackageManagerFromUserHandler(mContext,
-                                                UserHandle.of(userId)).queryIntentServices(intent,
-                                                flags);
-                                    } else {
-                                        return mContext.getPackageManager()
-                                                .queryIntentServicesAsUser(intent, flags, userId);
-                                    }
+                                    return UserUtil.getPackageManagerFromUserHandler(mContext,
+                                            UserHandle.of(userId)).queryIntentServices(intent,
+                                            flags);
                                 }
 
                                 @Override
@@ -362,9 +337,8 @@ public class TelecomSystem {
                                     return mCallsManager.getCurrentUserHandle();
                                 }
                             },
-                            mContext.getResources().getString(
-                                    com.android.server.telecom.R.string
-                                            .call_diagnostic_service_package_name),
+                            TelecomResourceId.getString(mContext,
+                                    "call_diagnostic_service_package_name"),
                             mLock
                     );
 
@@ -374,23 +348,14 @@ public class TelecomSystem {
             ToastFactory toastFactory = new ToastFactory() {
                 @Override
                 public void makeText(Context context, int resId, int duration) {
-                    if (mFeatureFlags.telecomResolveHiddenDependencies()) {
-                        context.getMainExecutor().execute(() ->
-                                Toast.makeText(context, resId, duration).show());
-                    } else {
-                        Toast.makeText(context, context.getMainLooper(),
-                                context.getString(resId), duration).show();
-                    }
+                    context.getMainExecutor().execute(() ->
+                            Toast.makeText(context, resId, duration).show());
                 }
 
                 @Override
                 public void makeText(Context context, CharSequence text, int duration) {
-                    if (mFeatureFlags.telecomResolveHiddenDependencies()) {
-                        context.getMainExecutor().execute(() ->
-                                Toast.makeText(context, text, duration).show());
-                    } else {
-                        Toast.makeText(context, context.getMainLooper(), text, duration).show();
-                    }
+                    context.getMainExecutor().execute(() ->
+                            Toast.makeText(context, text, duration).show());
                 }
             };
 
@@ -398,13 +363,9 @@ public class TelecomSystem {
                     new EmergencyCallDiagnosticLogger(mContext.getSystemService(
                             TelephonyManager.class), mContext.getSystemService(
                             BugreportManager.class), timeoutsAdapter, mContext.getSystemService(
-                            DropBoxManager.class), asyncTaskExecutor, clockProxy,
-                            mContext.getResources().getBoolean(
-                                    com.android.server.telecom.R.bool
-                                            .enable_logcat_collection_for_all_emergency_calls));
+                            DropBoxManager.class), asyncTaskExecutor, clockProxy);
 
-            mMetricsController = featureFlags.telecomMetricsSupport()
-                    ? TelecomMetricsController.make(mContext) : null;
+            mMetricsController = TelecomMetricsController.make(mContext);
 
             ScheduledExecutorService scheduledExecutorService =
                     Executors.newSingleThreadScheduledExecutor();
@@ -421,6 +382,10 @@ public class TelecomSystem {
                                     userHandle, packageName, mFeatureFlags), asyncTaskExecutor,
                             mFeatureFlags);
 
+            LowBatteryAlertListener lowBatteryAlertListener =
+                    Flags.supportLowBatteryAlert() ? new LowBatteryAlertListener(mContext,
+                            scheduledExecutorService) : null;
+
             mCallsManager = new CallsManager(
                     mContext,
                     mLock,
@@ -432,7 +397,6 @@ public class TelecomSystem {
                     proximitySensorManagerFactory,
                     inCallWakeLockControllerFactory,
                     connectionServiceFocusManagerFactory,
-                    audioServiceFactory,
                     bluetoothRouteManager,
                     wiredHeadsetManager,
                     systemStateHelper,
@@ -466,7 +430,9 @@ public class TelecomSystem {
                     IncomingCallFilterGraph::new,
                     mMetricsController,
                     vibratorAdapter,
-                    scheduledExecutorService);
+                    scheduledExecutorService,
+                    lowBatteryAlertListener,
+                    telecomUiPackageName);
             bluetoothDeviceManager.setCallsManager(mCallsManager);
             mIncomingCallNotifier = incomingCallNotifier;
             incomingCallNotifier.setCallsManagerProxy(new IncomingCallNotifier.CallsManagerProxy() {
@@ -492,26 +458,25 @@ public class TelecomSystem {
             mCallsManager.setIncomingCallNotifier(mIncomingCallNotifier);
 
             mRespondViaSmsManager = new RespondViaSmsManager(mCallsManager, mLock,
-                asyncTaskExecutor, featureFlags);
+                asyncTaskExecutor);
             mCallsManager.setRespondViaSmsManager(mRespondViaSmsManager);
 
             // IMPORTANT: This context must be retained or the receivers we register here will never
             // fire once the context is garbage collected.
             mAllUsersContext = mContext.createContextAsUser(UserHandle.ALL, 0);
-            if (mFeatureFlags.resolveHiddenDependenciesTwo()) {
-                mAllUsersContext.registerReceiver(mUserSwitchedReceiver, USER_SWITCHED_FILTER,
-                        Context.RECEIVER_NOT_EXPORTED);
-                mAllUsersContext.registerReceiver(mUserStartingReceiver, USER_STARTING_FILTER,
-                        Context.RECEIVER_NOT_EXPORTED);
-                mAllUsersContext.registerReceiver(mBootCompletedReceiver, BOOT_COMPLETE_FILTER,
-                        Context.RECEIVER_NOT_EXPORTED);
+            mAllUsersContext.registerReceiver(mUserSwitchedReceiver, USER_SWITCHED_FILTER,
+                    Context.RECEIVER_NOT_EXPORTED);
+            mAllUsersContext.registerReceiver(mUserStartingReceiver, USER_STARTING_FILTER,
+                    Context.RECEIVER_NOT_EXPORTED);
+            mAllUsersContext.registerReceiver(mBootCompletedReceiver, BOOT_COMPLETE_FILTER,
+                    Context.RECEIVER_NOT_EXPORTED);
+            if (com.android.internal.telecom.flags.Flags.registerBluetoothReceiverForAllUsers()) {
+                mAllUsersContext.registerReceiver(bluetoothStateReceiver,
+                        BluetoothStateReceiver.INTENT_FILTER,
+                        Context.RECEIVER_EXPORTED);
             } else {
-                mContext.registerReceiverAsUser(mUserSwitchedReceiver, UserHandle.ALL,
-                        USER_SWITCHED_FILTER, null, null, Context.RECEIVER_NOT_EXPORTED);
-                mContext.registerReceiverAsUser(mUserStartingReceiver, UserHandle.ALL,
-                        USER_STARTING_FILTER, null, null, Context.RECEIVER_NOT_EXPORTED);
-                mContext.registerReceiverAsUser(mBootCompletedReceiver, UserHandle.ALL,
-                        BOOT_COMPLETE_FILTER, null, null, Context.RECEIVER_NOT_EXPORTED);
+                mContext.registerReceiver(bluetoothStateReceiver,
+                        BluetoothStateReceiver.INTENT_FILTER);
             }
 
             // Set current user explicitly since USER_SWITCHED_FILTER intent can be missed at
@@ -523,9 +488,46 @@ public class TelecomSystem {
             }
 
             mCallIntentProcessor = new CallIntentProcessor(mContext, mCallsManager,
-                    defaultDialerCache, featureFlags);
+                    defaultDialerCache, telecomUiPackageName, featureFlags);
             mTelecomBroadcastIntentProcessor = new TelecomBroadcastIntentProcessor(
                     mContext, mCallsManager, mFeatureFlags);
+
+            IntentFilter telecomBroadcastFilter = new IntentFilter();
+            telecomBroadcastFilter.addAction(TelecomBroadcastIntentProcessor
+                    .ACTION_CLEAR_MISSED_CALLS);
+            telecomBroadcastFilter.addAction(TelecomBroadcastIntentProcessor
+                    .ACTION_CALL_BACK_FROM_NOTIFICATION);
+            telecomBroadcastFilter.addAction(TelecomBroadcastIntentProcessor
+                    .ACTION_SEND_SMS_FROM_NOTIFICATION);
+            telecomBroadcastFilter.addAction(TelecomBroadcastIntentProcessor
+                    .ACTION_ANSWER_FROM_NOTIFICATION);
+            telecomBroadcastFilter.addAction(TelecomBroadcastIntentProcessor
+                    .ACTION_REJECT_FROM_NOTIFICATION);
+            telecomBroadcastFilter.addAction(TelecomBroadcastIntentProcessor
+                    .ACTION_PROCEED_WITH_CALL);
+            telecomBroadcastFilter.addAction(TelecomBroadcastIntentProcessor
+                    .ACTION_CANCEL_CALL);
+            telecomBroadcastFilter.addAction(TelecomBroadcastIntentProcessor
+                    .ACTION_PLACE_REDIRECTED_CALL);
+            telecomBroadcastFilter.addAction(TelecomBroadcastIntentProcessor
+                    .ACTION_PLACE_UNREDIRECTED_CALL);
+            telecomBroadcastFilter.addAction(TelecomBroadcastIntentProcessor
+                    .ACTION_CANCEL_REDIRECTED_CALL);
+            telecomBroadcastFilter.addAction(TelecomBroadcastIntentProcessor
+                    .ACTION_HANGUP_CALL);
+            telecomBroadcastFilter.addAction(TelecomBroadcastIntentProcessor
+                    .ACTION_STOP_STREAMING);
+            telecomBroadcastFilter.addAction(TelecomBroadcastIntentProcessor
+                    .ACTION_DISCONNECTED_SEND_SMS_FROM_NOTIFICATION);
+            telecomBroadcastFilter.addAction(TelecomBroadcastIntentProcessor
+                    .ACTION_DISCONNECTED_CALL_BACK_FROM_NOTIFICATION);
+            telecomBroadcastFilter.addAction(TelecomBroadcastIntentProcessor
+                    .ACTION_SEND_CALL_TO_LOCAL_VOICEMAIL);
+            telecomBroadcastFilter.addAction(TelecomBroadcastIntentProcessor
+                    .ACTION_PICKUP_LOCAL_VOICEMAIL);
+            mAllUsersContext.registerReceiver(new TelecomBroadcastReceiver(),
+                    telecomBroadcastFilter, TelecomManager.PERMISSION_TELECOM_UI_ACCESS, null,
+                    Context.RECEIVER_EXPORTED);
 
             // Register the receiver for the dialer secret codes, used to enable extended logging.
             mDialerCodeReceiver = new DialerCodeReceiver(mCallsManager);
@@ -535,22 +537,25 @@ public class TelecomSystem {
             // There is no USER_SWITCHED broadcast for user 0, handle it here explicitly.
             mTelecomServiceImpl = new TelecomServiceImpl(
                     mContext, mCallsManager, mPhoneAccountRegistrar,
-                    new CallIntentProcessor.AdapterImpl(defaultDialerCache),
+                    new CallIntentProcessor.AdapterImpl(defaultDialerCache, telecomUiPackageName),
                     new UserCallIntentProcessorFactory() {
                         @Override
                         public UserCallIntentProcessor create(Context context,
                                 UserHandle userHandle) {
-                            return new UserCallIntentProcessor(context, userHandle, featureFlags);
+                            return new UserCallIntentProcessor(context, userHandle,
+                                    telecomUiPackageName);
                         }
                     },
                     defaultDialerCache,
                     new TelecomServiceImpl.SubscriptionManagerAdapterImpl(),
-                    new TelecomServiceImpl.SettingsSecureAdapterImpl(),
                     featureFlags,
+                    moduleFeatureFlags,
                     null,
+                    new com.android.internal.telecom.flags.Flags(),
                     mLock,
                     mMetricsController,
-                    sysUiPackageName);
+                    sysUiPackageName,
+                    telecomUiPackageName);
         } finally {
             Log.endSession();
         }

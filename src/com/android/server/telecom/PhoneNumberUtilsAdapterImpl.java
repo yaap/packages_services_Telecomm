@@ -20,8 +20,18 @@ import android.content.Context;
 import android.content.Intent;
 import android.telephony.PhoneNumberUtils;
 import android.telephony.TelephonyManager;
+import android.text.TextUtils;
+
+import com.android.internal.telecom.flags.Flags;
 
 public class PhoneNumberUtilsAdapterImpl implements PhoneNumberUtilsAdapter {
+
+    private final Context mContext;
+
+    public PhoneNumberUtilsAdapterImpl(Context context) {
+        mContext = context;
+    }
+
     @Override
     public boolean isUriNumber(String number) {
         return PhoneNumberUtils.isUriNumber(number);
@@ -29,7 +39,22 @@ public class PhoneNumberUtilsAdapterImpl implements PhoneNumberUtilsAdapter {
 
     @Override
     public boolean isSamePhoneNumber(String number1, String number2) {
-        return PhoneNumberUtils.compare(number1, number2);
+        if (Flags.useAreSamePhoneNumber()) {
+            TelephonyManager telephonyManager = mContext.getSystemService(TelephonyManager.class);
+            String countryIso = "";
+            if (telephonyManager != null) {
+                countryIso = telephonyManager.getNetworkCountryIso();
+            }
+
+            // If Country ISO is missing (common in CTS/No-SIM), default to "US"
+            // to allow areSamePhoneNumber to parse and match local numbers.
+            if (TextUtils.isEmpty(countryIso)) {
+                countryIso = java.util.Locale.getDefault().getCountry();
+            }
+            return PhoneNumberUtils.areSamePhoneNumber(number1, number2, countryIso);
+        } else {
+            return PhoneNumberUtils.compare(number1, number2);
+        }
     }
 
     @Override

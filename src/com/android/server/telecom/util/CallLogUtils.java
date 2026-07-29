@@ -16,33 +16,34 @@
 
 package com.android.server.telecom.util;
 
-import static android.provider.CallLog.Calls.ADD_FOR_ALL_USERS;
 import static android.provider.CallLog.Calls.ASSERTED_DISPLAY_NAME;
 import static android.provider.CallLog.Calls.BLOCK_REASON;
+import static android.provider.CallLog.Calls.CACHED_LOOKUP_URI;
 import static android.provider.CallLog.Calls.CACHED_NAME;
 import static android.provider.CallLog.Calls.CALL_SCREENING_APP_NAME;
 import static android.provider.CallLog.Calls.CALL_SCREENING_COMPONENT_NAME;
 import static android.provider.CallLog.Calls.COMPOSER_PHOTO_URI;
 import static android.provider.CallLog.Calls.CONTENT_URI;
+import static android.provider.CallLog.Calls.CONTENT_VOIP_URI;
 import static android.provider.CallLog.Calls.DATA_USAGE;
 import static android.provider.CallLog.Calls.DATE;
 import static android.provider.CallLog.Calls.DEFAULT_SORT_ORDER;
 import static android.provider.CallLog.Calls.DURATION;
 import static android.provider.CallLog.Calls.FEATURES;
 import static android.provider.CallLog.Calls.IS_BUSINESS_CALL;
-import static android.provider.CallLog.Calls.IS_PHONE_ACCOUNT_MIGRATION_PENDING;
 import static android.provider.CallLog.Calls.IS_READ;
 import static android.provider.CallLog.Calls.MISSED_REASON;
 import static android.provider.CallLog.Calls.MISSED_TYPE;
 import static android.provider.CallLog.Calls.NEW;
 import static android.provider.CallLog.Calls.NUMBER;
 import static android.provider.CallLog.Calls.NUMBER_PRESENTATION;
-import static android.provider.CallLog.Calls.PHONE_ACCOUNT_ADDRESS;
 import static android.provider.CallLog.Calls.PHONE_ACCOUNT_COMPONENT_NAME;
 import static android.provider.CallLog.Calls.PHONE_ACCOUNT_ID;
 import static android.provider.CallLog.Calls.POST_DIAL_DIGITS;
 import static android.provider.CallLog.Calls.PREFERRED_DISPLAY_NAME;
 import static android.provider.CallLog.Calls.PRESENTATION_ALLOWED;
+import static android.provider.CallLog.Calls.PRESENTATION_RESTRICTED;
+import static android.provider.CallLog.Calls.PRESENTATION_PAYPHONE;
 import static android.provider.CallLog.Calls.PRESENTATION_UNAVAILABLE;
 import static android.provider.CallLog.Calls.PRESENTATION_UNKNOWN;
 import static android.provider.CallLog.Calls.PRIORITY;
@@ -54,29 +55,22 @@ import static android.provider.CallLog.Calls.VIA_NUMBER;
 import android.annotation.NonNull;
 import android.annotation.SuppressLint;
 import android.content.ComponentName;
-import android.content.ContentProvider;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Context;
-import android.database.Cursor;
-import android.location.Country;
-import android.location.CountryDetector;
 import android.net.Uri;
+import android.os.Build;
 import android.os.UserHandle;
 import android.os.UserManager;
 import android.provider.CallLog;
-import android.provider.ContactsContract.CommonDataKinds.Callable;
-import android.provider.ContactsContract.CommonDataKinds.Phone;
-import android.provider.ContactsContract.Data;
-import android.provider.ContactsContract.DataUsageFeedback;
 import android.telecom.PhoneAccount;
 import android.telecom.PhoneAccountHandle;
 import android.telecom.TelecomManager;
-import android.telephony.PhoneNumberUtils;
 import android.text.TextUtils;
 import android.util.Log;
 
 import com.android.server.telecom.flags.Flags;
+import com.android.server.telecom.TelecomResourceId;
 
 import java.util.List;
 import java.util.Locale;
@@ -85,6 +79,15 @@ import java.util.Locale;
  * Encapsulates the util methods to update the call log
  */
 public class CallLogUtils {
+    // TODO(b/469123257) - remap to call log version when exposed.
+    public static final String ADD_FOR_ALL_USERS = "add_for_all_users";
+
+    // TODO(b/469123257) - remap to call log version when exposed.
+    public static final String IS_PHONE_ACCOUNT_MIGRATION_PENDING =
+            "is_call_log_phone_account_migration_pending";
+
+    // TODO(b/469123257) - remap to call log version when exposed.
+    public static final String PHONE_ACCOUNT_ADDRESS = "phone_account_address";
 
     private static final String LOG_TAG = "CallLogUtils";
     private static final boolean VERBOSE_LOG = false; // DON'T SUBMIT WITH TRUE.
@@ -280,7 +283,8 @@ public class CallLogUtils {
 
         int numberPresentation = getLogNumberPresentation(params.mNumber, params.mPresentation);
         String name = (params.mCallerInfo != null) ? params.mCallerInfo.getName() : "";
-        if (numberPresentation != PRESENTATION_ALLOWED) {
+        // Clear the number and name if the presentation is restricted
+        if (numberPresentation == PRESENTATION_RESTRICTED) {
             params.mNumber = "";
             if (params.mCallerInfo != null) {
                 name = "";
@@ -335,53 +339,12 @@ public class CallLogUtils {
         if (Flags.integratedCallLogs()) {
             values.put(UUID, params.mUuid);
         }
+        if (android.telecom.flags.Flags.integratedCallLogsStage2()
+                && params.mVoipContactLookupUri != null) {
+            values.put(CACHED_LOOKUP_URI, params.mVoipContactLookupUri.toString());
+        }
         if (Flags.supportDisplayNameCallLog()) {
             values.put(PREFERRED_DISPLAY_NAME, params.mPreferredDisplayName);
-        }
-        if ((params.mCallerInfo != null) && (params.mCallerInfo.getContactId() > 0)) {
-            // Update usage information for the number associated with the contact ID.
-            // We need to use both the number and the ID for obtaining a data ID since other
-            // contacts may have the same number.
-
-            final Cursor cursor;
-
-            // We should prefer normalized one (probably coming from
-            // Phone.NORMALIZED_NUMBER column) first. If it isn't available try others.
-            if (params.mCallerInfo.normalizedNumber != null) {
-                final String normalizedPhoneNumber = params.mCallerInfo.normalizedNumber;
-                cursor = resolver.query(Phone.CONTENT_URI,
-                    new String[]{Phone._ID},
-                    Phone.CONTACT_ID + " =? AND " + Phone.NORMALIZED_NUMBER + " =?",
-                    new String[]{String.valueOf(params.mCallerInfo.getContactId()),
-                        normalizedPhoneNumber},
-                    null);
-            } else {
-                final String phoneNumber = params.mCallerInfo.getPhoneNumber() != null
-                    ? params.mCallerInfo.getPhoneNumber() : params.mNumber;
-                cursor = resolver.query(
-                    Uri.withAppendedPath(Callable.CONTENT_FILTER_URI,
-                        Uri.encode(phoneNumber)),
-                    new String[]{Phone._ID},
-                    Phone.CONTACT_ID + " =?",
-                    new String[]{String.valueOf(params.mCallerInfo.getContactId())},
-                    null);
-            }
-
-            if (cursor != null) {
-                try {
-                    if (cursor.getCount() > 0 && cursor.moveToFirst()) {
-                        final String dataId = cursor.getString(0);
-                        updateDataUsageStatForData(resolver, dataId);
-                        if (params.mDuration >= MIN_DURATION_FOR_NORMALIZED_NUMBER_UPDATE_MS
-                            && params.mCallType == CallLog.Calls.OUTGOING_TYPE
-                            && TextUtils.isEmpty(params.mCallerInfo.normalizedNumber)) {
-                            updateNormalizedNumber(context, resolver, dataId, params.mNumber);
-                        }
-                    }
-                } finally {
-                    cursor.close();
-                }
-            }
         }
 
         /*
@@ -409,7 +372,7 @@ public class CallLogUtils {
         Uri result = null;
 
         final UserManager userManager = context.getSystemService(UserManager.class);
-        final int currentUserId = userManager.getProcessUserId();
+        final int currentUserId = UserHandle.myUserId();
 
         if (params.mAddForAllUsers) {
             if (userManager.isUserUnlocked(UserHandle.SYSTEM)) {
@@ -433,7 +396,7 @@ public class CallLogUtils {
                 // Nothing further to do; just return null.
                 return null;
             }
-            if (UserHandle.USER_SYSTEM == currentUserId) {
+            if (userManager.isSystemUser()) {
                 result = uriForSystem;
             }
 
@@ -521,15 +484,28 @@ public class CallLogUtils {
         return false;
     }
 
+    /* TODO: b/478043076 - Remove SuppressLint once the addEntryAndRemoveExpiredEntries
+     * API is finalized. And update the SDK check to the final version number.
+     */
+    @SuppressLint("NewApi")
     private static Uri addEntryAndRemoveExpiredEntries(Context context, UserManager userManager,
         UserHandle user, ContentValues values) {
         final ContentResolver resolver = context.getContentResolver();
 
         // Since we're doing this operation on behalf of an app, we only
         // want to use the actual "unlocked" state.
-        final Uri uri = ContentProvider.maybeAddUserId(
-            userManager.isUserUnlocked(user) ? CONTENT_URI : SHADOW_CONTENT_URI,
-            user.getIdentifier());
+        final String uuid = values.containsKey(UUID) ? values.getAsString(UUID) : null;
+        // Adjust the URI depending on if we're adding a VOIP call log entry.
+        boolean handlingVoipEntry = uuid != null;
+        final Uri baseUri;
+        if (handlingVoipEntry && Flags.integratedCallLogs()) {
+            baseUri = CONTENT_VOIP_URI;
+        } else {
+            // Fallback to the regular URI for older devices or non-VOIP entries.
+            baseUri = CONTENT_URI;
+        }
+        final Uri uri = maybeAddUserId(userManager.isUserUnlocked(user)
+                        ? baseUri : SHADOW_CONTENT_URI, user.getIdentifier());
 
         Log.i(LOG_TAG, String.format(Locale.getDefault(),
             "addEntryAndRemoveExpiredEntries: provider uri=%s", uri));
@@ -569,9 +545,7 @@ public class CallLogUtils {
             int maxCallLogSize = DEFAULT_MAX_CALL_LOG_SIZE;
             if (!TextUtils.isEmpty(phoneAccountId)
                 && !TextUtils.isEmpty(phoneAccountComponentName)) {
-                if (android.provider.Flags.allowConfigMaximumCallLogEntriesPerSim()
-                    && TELEPHONY_COMPONENT_NAME
-                    .flattenToString().equals(phoneAccountComponentName)) {
+                if (TELEPHONY_COMPONENT_NAME.flattenToString().equals(phoneAccountComponentName)) {
                     final int resId = context.getResources().getIdentifier(
                             "config_maximumCallLogEntriesPerSim", "integer", "android");
                     maxCallLogSize = context.getResources().getInteger(resId);
@@ -611,7 +585,7 @@ public class CallLogUtils {
         ContentValues locationValues = new ContentValues();
         locationValues.put(CallLog.Locations.LATITUDE, params.mLatitude);
         locationValues.put(CallLog.Locations.LONGITUDE, params.mLongitude);
-        Uri locationUri = ContentProvider.maybeAddUserId(CallLog.Locations.CONTENT_URI,
+        Uri locationUri = maybeAddUserId(CallLog.Locations.CONTENT_URI,
             user.getIdentifier());
         try {
             return resolver.insert(locationUri, locationValues);
@@ -623,37 +597,6 @@ public class CallLogUtils {
         }
     }
 
-    private static void updateDataUsageStatForData(ContentResolver resolver, String dataId) {
-        final Uri feedbackUri = DataUsageFeedback.FEEDBACK_URI.buildUpon()
-            .appendPath(dataId)
-            .appendQueryParameter(DataUsageFeedback.USAGE_TYPE,
-                DataUsageFeedback.USAGE_TYPE_CALL)
-            .build();
-        resolver.update(feedbackUri, new ContentValues(), null, null);
-    }
-
-    /*
-     * Update the normalized phone number for the given dataId in the ContactsProvider, based
-     * on the user's current country.
-     */
-    private static void updateNormalizedNumber(Context context, ContentResolver resolver,
-        String dataId, String number) {
-        if (TextUtils.isEmpty(number) || TextUtils.isEmpty(dataId)) {
-            return;
-        }
-        final String countryIso = getCurrentCountryIso(context);
-        if (TextUtils.isEmpty(countryIso)) {
-            return;
-        }
-        final String normalizedNumber = PhoneNumberUtils.formatNumberToE164(number, countryIso);
-        if (TextUtils.isEmpty(normalizedNumber)) {
-            return;
-        }
-        final ContentValues values = new ContentValues();
-        values.put(Phone.NORMALIZED_NUMBER, normalizedNumber);
-        resolver.update(Data.CONTENT_URI, values, Data._ID + "=?", new String[]{dataId});
-    }
-
     /**
      * Remap network specified number presentation types TelecomManager.PRESENTATION_xxx to calllog
      * number presentation types Calls.PRESENTATION_xxx, in order to insulate the persistent calllog
@@ -662,11 +605,11 @@ public class CallLogUtils {
      */
     private static int getLogNumberPresentation(String number, int presentation) {
         if (presentation == TelecomManager.PRESENTATION_RESTRICTED) {
-            return presentation;
+            return PRESENTATION_RESTRICTED;
         }
 
         if (presentation == TelecomManager.PRESENTATION_PAYPHONE) {
-            return presentation;
+            return PRESENTATION_PAYPHONE;
         }
 
         if (presentation == TelecomManager.PRESENTATION_UNAVAILABLE) {
@@ -705,18 +648,6 @@ public class CallLogUtils {
         return accountAddress;
     }
 
-    private static String getCurrentCountryIso(Context context) {
-        String countryIso = null;
-        final CountryDetector detector = context.getSystemService(CountryDetector.class);
-        if (detector != null) {
-            final Country country = detector.detectCountry();
-            if (country != null) {
-                countryIso = country.getCountryIso();
-            }
-        }
-        return countryIso;
-    }
-
     /**
      * Used as an argument to {@link Calls#addCall(Context, AddCallParams)}.
      *
@@ -752,6 +683,7 @@ public class CallLogUtils {
         private String mAssertedDisplayName;
         private String mUuid;
         private String mPreferredDisplayName;
+        private Uri mVoipContactLookupUri;
 
         private AddCallParams(CallerInfo callerInfo, String number, String postDialDigits,
             String viaNumber, int presentation, int callType, int features,
@@ -835,7 +767,8 @@ public class CallLogUtils {
                 long missedReason,
                 int priority, String subject, double latitude, double longitude, Uri pictureUri,
                 int isPhoneAccountMigrationPending, boolean isBusinessCall,
-                String assertedDisplayName, String uuid, String preferredDisplayName) {
+                String assertedDisplayName, String uuid, String preferredDisplayName,
+                Uri voipLookupUri) {
             this(callerInfo, number, postDialDigits, viaNumber, presentation, callType, features,
                     accountHandle, start, duration, dataUsage, addForAllUsers, userToBeInsertedTo,
                     isRead, callBlockReason, callScreeningAppName, callScreeningComponentName,
@@ -844,6 +777,9 @@ public class CallLogUtils {
             mUuid = uuid;
             if (Flags.supportDisplayNameCallLog()) {
                 mPreferredDisplayName = preferredDisplayName;
+            }
+            if (android.telecom.flags.Flags.integratedCallLogsStage2()) {
+                mVoipContactLookupUri = voipLookupUri;
             }
         }
 
@@ -881,6 +817,7 @@ public class CallLogUtils {
             private String mAssertedDisplayName;
             private String mUuid;
             private String mPreferredDisplayName;
+            private Uri mVoipContactLookupUri;
 
             /**
              * @param callerInfo the CallerInfo object to get the target contact from.
@@ -1165,6 +1102,17 @@ public class CallLogUtils {
             }
 
             /**
+             * @param voipContactLookupUri {@link Uri} pointing to the VoIP contact directory.
+             *     A lookup URI that is used by the system dialer for enriched call information
+             *     associated with the VoIP call.
+             */
+            public @NonNull AddCallParametersBuilder setVoipContactLookupUri(
+                    @NonNull Uri voipContactLookupUri) {
+                mVoipContactLookupUri = voipContactLookupUri;
+                return this;
+            }
+
+            /**
              * Builds the object
              */
             public @NonNull AddCallParams build() {
@@ -1177,7 +1125,8 @@ public class CallLogUtils {
                                 mCallScreeningAppName, mCallScreeningComponentName, mMissedReason,
                                 mPriority, mSubject, mLatitude, mLongitude, mPictureUri,
                                 mIsPhoneAccountMigrationPending, mIsBusinessCall,
-                                mAssertedDisplayName, mUuid, mPreferredDisplayName);
+                                mAssertedDisplayName, mUuid, mPreferredDisplayName,
+                                mVoipContactLookupUri);
                     } else {
                         return new AddCallParams(mCallerInfo, mNumber, mPostDialDigits, mViaNumber,
                                 mPresentation, mCallType, mFeatures, mAccountHandle, mStart,
@@ -1199,5 +1148,24 @@ public class CallLogUtils {
                 }
             }
         }
+    }
+
+    private static Uri maybeAddUserId(Uri uri, int userId) {
+        if (uri == null) return null;
+        if ((userId != UserHandle.CURRENT.getIdentifier())
+                && ContentResolver.SCHEME_CONTENT.equals(uri.getScheme())) {
+            if (!uriHasUserId(uri)) {
+                //We don't add the user Id if there's already one
+                Uri.Builder builder = uri.buildUpon();
+                builder.encodedAuthority("" + userId + "@" + uri.getEncodedAuthority());
+                return builder.build();
+            }
+        }
+        return uri;
+    }
+
+    private static boolean uriHasUserId(Uri uri) {
+        if (uri == null) return false;
+        return !TextUtils.isEmpty(uri.getUserInfo());
     }
 }

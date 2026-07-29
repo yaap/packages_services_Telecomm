@@ -21,9 +21,9 @@ import android.media.AudioDeviceCallback;
 import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
 import android.telecom.Log;
+import android.util.IndentingPrintWriter;
 
 import com.android.internal.annotations.VisibleForTesting;
-import com.android.internal.util.IndentingPrintWriter;
 
 import java.util.Collections;
 import java.util.Set;
@@ -82,7 +82,9 @@ public class WiredHeadsetManager {
         mAudioManager = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
         mIsPluggedIn = isWiredHeadsetPluggedIn();
 
-        mAudioManager.registerAudioDeviceCallback(new WiredHeadsetCallback(), null);
+        if (!com.android.internal.telecom.flags.Flags.callAudioRouteRf()) {
+            mAudioManager.registerAudioDeviceCallback(new WiredHeadsetCallback(), null);
+        }
     }
 
     @VisibleForTesting
@@ -101,6 +103,14 @@ public class WiredHeadsetManager {
         return mIsPluggedIn;
     }
 
+    public void refreshHeadsetStatus() {
+        boolean isPluggedIn = isWiredHeadsetPluggedIn();
+        if (mIsPluggedIn != isPluggedIn) {
+            Log.i(this, "refreshHeadsetStatus: plugged in: %b -> %b", mIsPluggedIn, isPluggedIn);
+            onHeadsetPluggedInChanged(isPluggedIn);
+        }
+    }
+
     private boolean isWiredHeadsetPluggedIn() {
         AudioDeviceInfo[] devices = mAudioManager.getDevices(AudioManager.GET_DEVICES_ALL);
         boolean isPluggedIn = false;
@@ -110,6 +120,7 @@ public class WiredHeadsetManager {
                 case AudioDeviceInfo.TYPE_WIRED_HEADSET:
                 case AudioDeviceInfo.TYPE_USB_HEADSET:
                 case AudioDeviceInfo.TYPE_USB_DEVICE:
+                case AudioDeviceInfo.TYPE_LINE_ANALOG:
                     isPluggedIn = true;
             }
             if (isPluggedIn) {

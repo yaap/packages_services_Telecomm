@@ -146,14 +146,6 @@
     <!-- Message shown when the user tries to make a video call when already in a video call. -->
     <string name ="duplicate_video_call_not_allowed">Call cannot be added at this time.</string>
 
-    <!-- missing voicemail number -->
-    <!-- Title of the "Missing voicemail number" dialog -->
-    <string name="no_vm_number">Missing voicemail number</string>
-    <!-- Body text of the "Missing voicemail number" dialog -->
-    <string name="no_vm_number_msg">No voicemail number is stored on the SIM card.</string>
-    <!-- Button label on the "Missing voicemail number" dialog -->
-    <string name="add_vm_number_str">Add number</string>
-
     <!-- Title of dialog used to confirm whether the user intends to change the default dialer
             application [CHAR LIMIT=55]-->
     <string name="change_default_dialer_dialog_title">Make <xliff:g id="new_app">%s</xliff:g> your default Phone app?</string>
@@ -179,22 +171,11 @@
     <!-- Blocked numbers -->
     <string name="blocked_numbers">Blocked numbers</string>
     <!-- Text shown at the beginning of the blocked numbers screen to explain what the screen is about. -->
-    <string name="blocked_numbers_msg">You won\'t receive calls or texts from blocked numbers.</string>
+    <string name="blocked_numbers_msg">You won\'t receive calls or texts from blocked numbers. When you make an emergency call, rejection settings are automatically turned off.</string>
     <!-- Button to add a blocked number. -->
     <string name="block_number">Add a number</string>
-    <!-- Body of dialog to confirm unblocking a number. -->
-    <string name="unblock_dialog_body">Unblock <xliff:g id="number_to_block">%1$s</xliff:g>?</string>
-    <!-- Button to unblock a number. -->
-    <string name="unblock_button">Unblock</string>
-    <!-- Body of dialog to block a number.  -->
-    <string name="add_blocked_dialog_body">Block calls and texts from</string>
     <!-- Hint shown in the edit text box for adding a blocked number -->
     <string name="add_blocked_number_hint">Phone number</string>
-    <!-- Button to block a number. -->
-    <string name="block_button">Block</string>
-    <!-- String shown to users unable to manage blocked numbers because they are not owners of the
-        device. -->
-    <string name="non_primary_user">Only the device owner can view and manage blocked numbers.</string>
     <!-- Description of icon to delete blocked number. -->
     <string name="delete_icon_description">Unblock</string>
     <!-- Title for butter bar shown when call blocking is disabled. -->
@@ -203,15 +184,6 @@
     <string name="blocked_numbers_butter_bar_body">After you dial or text an emergency number, blocking is turned off to ensure that emergency services can contact you.</string>
     <!-- Button to re-enable blocking shown in butter bar shown when call blocking is disabled. -->
     <string name="blocked_numbers_butter_bar_button">Re-enable now</string>
-    <!-- Message to show when a number is blocked. -->
-    <string name="blocked_numbers_number_blocked_message"><xliff:g id="blocked_number">%1$s</xliff:g> blocked</string>
-    <!-- Message to show when a number is unblocked. -->
-    <string name="blocked_numbers_number_unblocked_message"><xliff:g id="unblocked_number">%1$s</xliff:g> unblocked</string>
-    <!-- Message to show when a number cannot be blocked because it is associated with emergency services.. -->
-    <string name="blocked_numbers_block_emergency_number_message">Unable to block emergency number.</string>
-    <!-- Message to show when a number is already blocked. -->
-    <string name="blocked_numbers_number_already_blocked_message"><xliff:g id="blocked_number">%1$s</xliff:g> is already blocked.</string>
-
     <!-- DO NOT TRANSLATE. Label for test Subscription 0. -->
     <string name="test_account_0_label">Q Mobile</string>
     <!-- DO NOT TRANSLATE. Label for test Subscription 1. -->
@@ -332,9 +304,41 @@
          control a call taking place on their phone. -->
     <string name="notification_channel_call_streaming">Call streaming</string>
 
+    <!-- Notification title for a notification that is posted when a voicemail message is being
+         taken on the device. -->
+    <string name="notification_local_voicemail_title">Voicemail</string>
+    <!-- Notification content for a notification that is posted when a voicemail from the caller
+         whose name or phone number is `caller_name` is being recorded by the app named
+         `app_name`. -->
+    <string name="notification_local_voicemail_details">Voicemail is being recorded by <xliff:g id="app_name">%1$s</xliff:g> for call from <xliff:g id="caller_name">%2$s</xliff:g>.</string>
+    <!-- Notification content for a notification that is posted when a voicemail from an
+         unknown caller is being recorded by the app named`app_name`. -->
+    <string name="notification_local_voicemail_unknown_details">Voicemail is being recorded by <xliff:g id="app_name">%1$s</xliff:g> for call from an unknown caller.</string>
+    <!-- Notification content for a notification that is posted when a voicemail from an
+             unknown caller is being recorded by the app named `app_name`; this version is shown
+              when the user's device is locked and the name of the caller is hidden. -->
+    <string name="notification_local_voicemail_public_details">Voicemail is being recorded by <xliff:g id="app_name">%1$s</xliff:g> for a call.</string>
+
+    <!-- Notification content for a notification that is posted when a call from `caller_name` is
+         ringing so that they can choose to send the call to `app_name` to take a message. -->
+    <string name="notification_send_to_voicemail_details">Send call from <xliff:g id="caller_name">%2$s</xliff:g> to <xliff:g id="app_name">%1$s</xliff:g> to take a message.</string>
+    <!-- Notification content for a notification that is posted when a call is
+             ringing so that they can choose to send the call to `app_name` to take a message.
+             This version is shown when the device is locked and the caller name is hidden for
+             privacy purposes. -->
+    <string name="notification_send_to_voicemail_public_details">Send call to <xliff:g id="app_name">%1$s</xliff:g> to take a message.</string>
+
+    <!-- Notification button that the user presses to cause the current ringing call to be sent to
+         voicemail to have a message taken. -->
+    <string name="send_to_voicemail">Send to Voicemail</string>
+
+    <!-- Notification content for a notification that is posted when a call from an unknown caller
+         is ringing so that they can choose to send the call to `app_name` to take a message. -->
+    <string name="notification_send_to_voicemail_unknown_details">Send unknown caller to <xliff:g id="app_name">%1$s</xliff:g> to take a message.</string>
+
     <!-- Alert dialog content used to inform the user that placing a new outgoing call will end the
-         ongoing call in the app "other_app". -->
-    <string name="alert_outgoing_call">Placing this call will end your <xliff:g id="other_app">%1$s</xliff:g> call.</string>
+     ongoing call when the name of that app is null. -->
+    <string name="alert_outgoing_call_null_app_name">Placing this call will end your incoming call.</string>
 
     <!-- Alert dialog content used to ask the user to confirm if they want to place a new outgoing call redirected by the app "other_app". -->
     <string name="alert_redirect_outgoing_call_or_not">Choose how to place this call</string>
@@ -344,9 +348,6 @@
 
     <!-- A button in the alert dialog "alert_redirect_outgoing_call" to place the call without the redirected number provided by App. -->
     <string name="alert_place_unredirect_outgoing_call">Call using my phone number</string>
-
-    <!-- Alert dialog content used to tell the user the call is canceled because no response from the call redirection app "other_app". -->
-    <string name="alert_redirect_outgoing_call_timeout">Call can\'t be placed by <xliff:g id="other_app">%1$s</xliff:g>. Try using a different call redirecting app or contacting the developer for help.</string>
 
     <!-- The name of a feature available under the Call settings. -->
     <string name="phone_settings_call_blocking_txt">Call Blocking</string>
@@ -374,21 +375,13 @@
     <string name="phone_strings_call_blocking_turned_off_notification_title_txt">Call Blocking</string>
     <!-- Notification that appears when the feature Call Blocking has been disabled. -->
     <string name="phone_strings_call_blocking_turned_off_notification_text_txt">Call Blocking disabled</string>
-    <!-- Title of the dialog "phone_strings_emergency_call_made_dialog_text_txt". -->
-    <string name="phone_strings_emergency_call_made_dialog_title_txt">Emergency call made</string>
     <!-- Notification details that appear when the user taps the notification "phone_strings_call_blocking_turned_off_notification_text_txt". -->
     <string name="phone_strings_emergency_call_made_dialog_call_blocking_text_txt">Call Blocking has been disabled to allow emergency responders to contact you.</string>
-    <!-- Window title used for the Telecom Developer Menu -->
-    <string name="developer_title">Telecom Developer Menu</string>
     <!-- Some carriers allow an "external" call that has been placed on another device (another
     tablet, phone, etc...) to be transferred to this device and taken as a call. In
     the situation that we are already in an emergency call, notify the user that the call can not
     be taken at this time.-->
     <string name="toast_emergency_can_not_pull_call">Calls can not be taken while in an emergency call.</string>
-    <!-- Label for a switch in the Telecom Developer Menu which is used to enable the enhanced call
-         blocking functionality (for test purposes).
-         DO NOT TRANSLATE -->
-    <string name="developer_enhanced_call_blocking" translatable="false">Enhanced Call Blocking</string>
     <!-- Button label for generic cancel action [CHAR LIMIT=20] -->
     <string name="cancel">Cancel</string>
     <!-- Button label for generic back action [CHAR LIMIT=20] -->

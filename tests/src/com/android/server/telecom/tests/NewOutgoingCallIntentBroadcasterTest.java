@@ -39,6 +39,7 @@ import android.app.AppOpsManager;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Intent;
+import android.content.res.Resources;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
@@ -89,7 +90,7 @@ public class NewOutgoingCallIntentBroadcasterTest extends TelecomTestCase {
     @Mock private FeatureFlags mFeatureFlags;
 
     @Mock private MmiUtils mMmiUtils;
-    private PhoneNumberUtilsAdapter mPhoneNumberUtilsAdapter = new PhoneNumberUtilsAdapterImpl();
+    private PhoneNumberUtilsAdapter mPhoneNumberUtilsAdapter;
 
     @Override
     @Before
@@ -107,6 +108,7 @@ public class NewOutgoingCallIntentBroadcasterTest extends TelecomTestCase {
             any(PhoneAccountHandle.class))).thenReturn(mPhoneAccount);
         when(mPhoneAccount.isSelfManaged()).thenReturn(true);
         when(mSystemStateHelper.isCarModeOrProjectionActive()).thenReturn(false);
+        mPhoneNumberUtilsAdapter = new PhoneNumberUtilsAdapterImpl(mContext);
     }
 
     @Override
@@ -218,7 +220,9 @@ public class NewOutgoingCallIntentBroadcasterTest extends TelecomTestCase {
 
         String ui_package_string = "sample_string_1";
         String dialer_default_class_string = "sample_string_2";
-        mComponentContextFixture.putResource(com.android.internal.R.string.config_defaultDialer,
+        int mockConfigDefaultDialer = Resources.getSystem().getIdentifier("config_defaultDialer",
+                "string", "android");
+        mComponentContextFixture.putResource(mockConfigDefaultDialer,
                 ui_package_string);
         mComponentContextFixture.putResource(R.string.dialer_default_class,
                 dialer_default_class_string);
@@ -250,7 +254,9 @@ public class NewOutgoingCallIntentBroadcasterTest extends TelecomTestCase {
 
         String ui_package_string = "sample_string_1";
         String dialer_default_class_string = "sample_string_2";
-        mComponentContextFixture.putResource(com.android.internal.R.string.config_defaultDialer,
+        int mockConfigDefaultDialer = Resources.getSystem().getIdentifier("config_defaultDialer",
+                "string", "android");
+        mComponentContextFixture.putResource(mockConfigDefaultDialer,
                 ui_package_string);
         mComponentContextFixture.putResource(R.string.dialer_default_class,
                 dialer_default_class_string);
@@ -282,7 +288,9 @@ public class NewOutgoingCallIntentBroadcasterTest extends TelecomTestCase {
 
         String ui_package_string = "sample_string_1";
         String dialer_default_class_string = "sample_string_2";
-        mComponentContextFixture.putResource(com.android.internal.R.string.config_defaultDialer,
+        int mockConfigDefaultDialer = Resources.getSystem().getIdentifier("config_defaultDialer",
+                "string", "android");
+        mComponentContextFixture.putResource(mockConfigDefaultDialer,
                 ui_package_string);
         mComponentContextFixture.putResource(R.string.dialer_default_class,
                 dialer_default_class_string);
@@ -406,8 +414,7 @@ public class NewOutgoingCallIntentBroadcasterTest extends TelecomTestCase {
         verify(mContext).sendBroadcastAsUser(
                 intentArgumentCaptor.capture(),
                 eq(UserHandle.CURRENT),
-                eq(android.Manifest.permission.PROCESS_OUTGOING_CALLS),
-                eq(AppOpsManager.OP_PROCESS_OUTGOING_CALLS));
+                eq(android.Manifest.permission.PROCESS_OUTGOING_CALLS));
         Intent capturedIntent = intentArgumentCaptor.getValue();
         assertEquals(Intent.FLAG_RECEIVER_INCLUDE_BACKGROUND, capturedIntent.getFlags());
     }
@@ -455,18 +462,10 @@ public class NewOutgoingCallIntentBroadcasterTest extends TelecomTestCase {
     private void verifyBroadcastSent(String number, Bundle expectedExtras) {
         ArgumentCaptor<Intent> intentCaptor = ArgumentCaptor.forClass(Intent.class);
 
-        if (mFeatureFlags.telecomResolveHiddenDependencies()) {
-            verify(mContext).sendBroadcastAsUser(
-                    intentCaptor.capture(),
-                    eq(UserHandle.CURRENT),
-                    eq(Manifest.permission.PROCESS_OUTGOING_CALLS));
-        } else {
-            verify(mContext).sendBroadcastAsUser(
-                    intentCaptor.capture(),
-                    eq(UserHandle.CURRENT),
-                    eq(Manifest.permission.PROCESS_OUTGOING_CALLS),
-                    anyInt());
-        }
+        verify(mContext).sendBroadcastAsUser(
+                intentCaptor.capture(),
+                eq(UserHandle.CURRENT),
+                eq(Manifest.permission.PROCESS_OUTGOING_CALLS));
 
         Intent capturedIntent = intentCaptor.getValue();
         assertEquals(Intent.ACTION_NEW_OUTGOING_CALL, capturedIntent.getAction());

@@ -24,53 +24,73 @@ import static android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import android.app.ActivityManagerInternal;
 import android.app.ForegroundServiceDelegationOptions;
 import android.app.Notification;
+import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Person;
 import android.content.ComponentName;
+import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
+import android.os.OutcomeReceiver;
 import android.os.UserHandle;
+import android.platform.test.annotations.EnableFlags;
+import android.platform.test.flag.junit.SetFlagsRule;
 import android.service.notification.StatusBarNotification;
+import android.telecom.ConnectionService;
 import android.telecom.PhoneAccountHandle;
+import android.telecom.VideoProfile;
 
 import androidx.test.filters.SmallTest;
 
+import com.android.server.am.ActivityManagerLocal;
+import com.android.server.am.ForegroundServiceDelegationParams;
 import com.android.server.telecom.Call;
 import com.android.server.telecom.CallState;
 import com.android.server.telecom.TelecomSystem;
 import com.android.server.telecom.callsequencing.voip.VoipCallMonitor;
+import com.android.internal.telecom.flags.Flags;
 
 import org.junit.After;
 import org.junit.Before;
+import org.junit.ClassRule;
 import org.junit.Ignore;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 @RunWith(JUnit4.class)
+@EnableFlags(Flags.FLAG_VOIP_BACKGROUND_ACTIVITY_LAUNCH_FIX)
 public class VoipCallMonitorTest extends TelecomTestCase {
+    @ClassRule public static final SetFlagsRule.ClassRule mClassRule = new SetFlagsRule.ClassRule();
+    @Rule public final SetFlagsRule mSetFlagsRule = mClassRule.createSetFlagsRule();
+
     private VoipCallMonitor mMonitor;
     private static final String NAME = "John Smith";
     private static final String PKG_NAME_1 = "telecom.voip.test1";
@@ -83,9 +103,9 @@ public class VoipCallMonitorTest extends TelecomTestCase {
 
     @Mock private Handler mHandler;
     @Mock private TelecomSystem.SyncRoot mLock;
-    @Mock private ActivityManagerInternal mActivityManagerInternal;
+    @Mock private ActivityManagerLocal mActivityManagerLocal;
     @Mock private IBinder mServiceConnection;
-
+    @Mock private NotificationManager mNotificationManager;
     private final PhoneAccountHandle mHandle1User1 = new PhoneAccountHandle(
             new ComponentName(PKG_NAME_1, CLS_NAME), ID_1, USER_HANDLE_1);
     private final PhoneAccountHandle mHandle2User1 = new PhoneAccountHandle(
@@ -96,19 +116,21 @@ public class VoipCallMonitorTest extends TelecomTestCase {
     public void setUp() throws Exception {
         super.setUp();
         mHandler = mock(Handler.class);
+        mNotificationManager = mock(NotificationManager.class);
+        when(mContext.getSystemService(NotificationManager.class)).thenReturn(mNotificationManager);
+        when(mContext.getSystemService(Context.NOTIFICATION_SERVICE)).thenReturn(
+                mNotificationManager);
         mMonitor = new VoipCallMonitor(mContext, mHandler, mLock);
-        mActivityManagerInternal = mock(ActivityManagerInternal.class);
-        mMonitor.setActivityManagerInternal(mActivityManagerInternal);
-        mMonitor.registerNotificationListener();
-        when(mActivityManagerInternal.startForegroundServiceDelegate(any(
-                ForegroundServiceDelegationOptions.class), any(ServiceConnection.class)))
+        mActivityManagerLocal = mock(ActivityManagerLocal.class);
+        mMonitor.setActivityManagerLocal(mActivityManagerLocal);
+        when(mActivityManagerLocal.startForegroundServiceDelegate(any(
+                ForegroundServiceDelegationParams.class), any(ServiceConnection.class)))
                 .thenReturn(true);
     }
 
     @Override
     @After
     public void tearDown() throws Exception {
-        mMonitor.unregisterNotificationListener();
         super.tearDown();
     }
 
@@ -120,19 +142,19 @@ public class VoipCallMonitorTest extends TelecomTestCase {
     @Test
     public void testVerifyForegroundServiceTypesBeingPassedToActivityManager() {
         Call call = createTestCall("testCall", mHandle1User1);
-        ArgumentCaptor<ForegroundServiceDelegationOptions> optionsCaptor =
-                ArgumentCaptor.forClass(ForegroundServiceDelegationOptions.class);
+        ArgumentCaptor<ForegroundServiceDelegationParams> optionsCaptor =
+                ArgumentCaptor.forClass(ForegroundServiceDelegationParams.class);
 
         mMonitor.onCallAdded(call);
 
-        verify(mActivityManagerInternal, timeout(TIMEOUT)).startForegroundServiceDelegate(
+        verify(mActivityManagerLocal, timeout(TIMEOUT)).startForegroundServiceDelegate(
                 optionsCaptor.capture(), any(ServiceConnection.class));
 
         assertEquals(FOREGROUND_SERVICE_TYPE_PHONE_CALL |
                         FOREGROUND_SERVICE_TYPE_MICROPHONE |
                         FOREGROUND_SERVICE_TYPE_CAMERA |
                         FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
-                optionsCaptor.getValue().mForegroundServiceTypes);
+                optionsCaptor.getValue().foregroundServiceTypes);
 
         mMonitor.onCallRemoved(call);
     }
@@ -155,8 +177,8 @@ public class VoipCallMonitorTest extends TelecomTestCase {
         mMonitor.stopFGSDelegation(call, mHandle1User1);
 
         // THEN: a NullPointerException should not be thrown at runtime
-        verify(mActivityManagerInternal, times(0))
-                .stopForegroundServiceDelegate(any(ServiceConnection.class));
+        verify(mActivityManagerLocal, times(0))
+                .stopForegroundServiceDelegate(any(ForegroundServiceDelegationParams.class));
         assertEquals(0, m.size());
         assertNull(m.get(mHandle1User1));
     }
@@ -171,14 +193,14 @@ public class VoipCallMonitorTest extends TelecomTestCase {
         // WHEN - the Voip call is added and a notification is posted, verify FGS is gained
         addCallAndVerifyFgsIsGained(call);
         mMonitor.postNotification(sbn);
-        assertNotificationTimeoutTriggered();
+        assertNotificationTimeoutTriggered(0);
         assertFalse(mMonitor.getNewCallsMissingCallStyleNotificationQueue().contains(call));
 
         // THEN - when the Voip call is removed, verify that FGS is revoked for the app
         mMonitor.onCallRemoved(call);
         mMonitor.removeNotification(sbn);
-        verify(mActivityManagerInternal, times(1))
-                .stopForegroundServiceDelegate(any(ServiceConnection.class));
+        verify(mActivityManagerLocal, times(1))
+                .stopForegroundServiceDelegate(any(ForegroundServiceDelegationParams.class));
     }
 
     /**
@@ -198,26 +220,26 @@ public class VoipCallMonitorTest extends TelecomTestCase {
         addCallAndVerifyFgsIsGained(call1);
         assertTrue(mMonitor.getNewCallsMissingCallStyleNotificationQueue().contains(call1));
         mMonitor.postNotification(sbn1);
-        assertNotificationTimeoutTriggered();
+        assertNotificationTimeoutTriggered(0);
         assertFalse(mMonitor.getNewCallsMissingCallStyleNotificationQueue().contains(call1));
         // -- add the second call and post the corresponding notification
         mMonitor.onCallAdded(call2);
         assertTrue(mMonitor.getNewCallsMissingCallStyleNotificationQueue().contains(call2));
         mMonitor.postNotification(sbn2);
-        assertNotificationTimeoutTriggered();
+        assertNotificationTimeoutTriggered(1);
         assertFalse(mMonitor.getNewCallsMissingCallStyleNotificationQueue().contains(call2));
 
         // THEN - assert FGS is maintained for the process since there is still an ongoing call
         mMonitor.onCallRemoved(call1);
         mMonitor.removeNotification(sbn1);
-        assertNotificationTimeoutTriggered();
-        verify(mActivityManagerInternal, times(0))
-                .stopForegroundServiceDelegate(any(ServiceConnection.class));
+        assertNotificationTimeoutTriggered(0);
+        verify(mActivityManagerLocal, times(0))
+                .stopForegroundServiceDelegate(any(ForegroundServiceDelegationParams.class));
         // once all calls are removed, verify FGS is stopped
         mMonitor.onCallRemoved(call2);
         mMonitor.removeNotification(sbn2);
-        verify(mActivityManagerInternal, times(1))
-                .stopForegroundServiceDelegate(any(ServiceConnection.class));
+        verify(mActivityManagerLocal, times(1))
+                .stopForegroundServiceDelegate(any(ForegroundServiceDelegationParams.class));
     }
 
     @SmallTest
@@ -229,32 +251,32 @@ public class VoipCallMonitorTest extends TelecomTestCase {
 
         ArgumentCaptor<ServiceConnection> connCaptor1 = ArgumentCaptor.forClass(
                 ServiceConnection.class);
-        ArgumentCaptor<ForegroundServiceDelegationOptions> optionsCaptor1 =
-                ArgumentCaptor.forClass(ForegroundServiceDelegationOptions.class);
+        ArgumentCaptor<ForegroundServiceDelegationParams> optionsCaptor1 =
+                ArgumentCaptor.forClass(ForegroundServiceDelegationParams.class);
         mMonitor.onCallAdded(call1);
-        verify(mActivityManagerInternal, timeout(TIMEOUT).times(1))
+        verify(mActivityManagerLocal, timeout(TIMEOUT).times(1))
                 .startForegroundServiceDelegate(optionsCaptor1.capture(), connCaptor1.capture());
-        ForegroundServiceDelegationOptions options1 = optionsCaptor1.getValue();
+        ForegroundServiceDelegationParams options1 = optionsCaptor1.getValue();
         ServiceConnection conn1 = connCaptor1.getValue();
         conn1.onServiceConnected(mHandle1User1.getComponentName(), service);
-        assertEquals(PKG_NAME_1, options1.getComponentName().getPackageName());
+        assertEquals(PKG_NAME_1, options1.clientPackageName);
 
         ArgumentCaptor<ServiceConnection> connCaptor2 = ArgumentCaptor.forClass(
                 ServiceConnection.class);
-        ArgumentCaptor<ForegroundServiceDelegationOptions> optionsCaptor2 =
-                ArgumentCaptor.forClass(ForegroundServiceDelegationOptions.class);
+        ArgumentCaptor<ForegroundServiceDelegationParams> optionsCaptor2 =
+                ArgumentCaptor.forClass(ForegroundServiceDelegationParams.class);
         mMonitor.onCallAdded(call2);
-        verify(mActivityManagerInternal, timeout(TIMEOUT).times(2))
+        verify(mActivityManagerLocal, timeout(TIMEOUT).times(2))
                 .startForegroundServiceDelegate(optionsCaptor2.capture(), connCaptor2.capture());
-        ForegroundServiceDelegationOptions options2 = optionsCaptor2.getValue();
+        ForegroundServiceDelegationParams options2 = optionsCaptor2.getValue();
         ServiceConnection conn2 = connCaptor2.getValue();
         conn2.onServiceConnected(mHandle2User1.getComponentName(), service);
-        assertEquals(PKG_NAME_2, options2.getComponentName().getPackageName());
+        assertEquals(PKG_NAME_2, options2.clientPackageName);
 
         mMonitor.onCallRemoved(call2);
-        verify(mActivityManagerInternal).stopForegroundServiceDelegate(eq(conn2));
+        verify(mActivityManagerLocal).stopForegroundServiceDelegate(eq(options2));
         mMonitor.onCallRemoved(call1);
-        verify(mActivityManagerInternal).stopForegroundServiceDelegate(eq(conn1));
+        verify(mActivityManagerLocal).stopForegroundServiceDelegate(eq(options1));
     }
 
     /**
@@ -271,7 +293,8 @@ public class VoipCallMonitorTest extends TelecomTestCase {
 
         // WHEN
         // FGS is gained after the call is added to VoipCallMonitor
-        ServiceConnection c = addCallAndVerifyFgsIsGained(createTestCall("1", mHandle1User1));
+        ForegroundServiceDelegationParams params =
+                addCallAndVerifyFgsIsGained(createTestCall("1", mHandle1User1));
         // simulate an app posting a call style notification after FGS is gained
         mMonitor.postNotification(sbn);
 
@@ -279,8 +302,9 @@ public class VoipCallMonitorTest extends TelecomTestCase {
         // shortly after posting the notification, simulate the user dismissing it
         mMonitor.removeNotification(sbn);
         // FGS should be removed once the notification is removed
-        assertNotificationTimeoutTriggered();
-        verify(mActivityManagerInternal, times(1)).stopForegroundServiceDelegate(c);
+        assertNotificationTimeoutTriggered(0);
+        verify(mActivityManagerLocal, times(1))
+                .stopForegroundServiceDelegate(params);
     }
 
 
@@ -322,22 +346,194 @@ public class VoipCallMonitorTest extends TelecomTestCase {
         mMonitor.postNotification(sbn1);
         assertFalse(mMonitor.getNewCallsMissingCallStyleNotificationQueue().contains(call1));
         mMonitor.removeNotification(sbn1);
-        assertNotificationTimeoutTriggered();
+        assertNotificationTimeoutTriggered(0);
 
         // -- keep the second notification up since the call will continue
         mMonitor.postNotification(sbn2);
         assertFalse(mMonitor.getNewCallsMissingCallStyleNotificationQueue().contains(call2));
 
         // THEN - assert FGS is maintained for the process since there is still an ongoing call
-        assertNotificationTimeoutTriggered();
-        verify(mActivityManagerInternal, times(0))
-                .stopForegroundServiceDelegate(any(ServiceConnection.class));
+        assertNotificationTimeoutTriggered(1);
+        verify(mActivityManagerLocal, times(0))
+                .stopForegroundServiceDelegate(any(ForegroundServiceDelegationParams.class));
 
         // once all calls are removed, verify FGS is stopped
         mMonitor.onCallRemoved(call2);
         mMonitor.removeNotification(sbn2);
-        verify(mActivityManagerInternal, timeout(TIMEOUT).times(1))
-                .stopForegroundServiceDelegate(any(ServiceConnection.class));
+        verify(mActivityManagerLocal, timeout(TIMEOUT).times(1))
+                .stopForegroundServiceDelegate(any(ForegroundServiceDelegationParams.class));
+    }
+
+    /**
+     * Verifies that if FGS delegation is stopped for an app, it can be re-granted for a
+     * subsequent call. This tests the scenario where a stale ServiceConnection could prevent
+     * a new FGS delegation from being created.
+     */
+    @SmallTest
+    @Test
+    public void testFgsIsReGrantedAfterStopping() {
+        // GIVEN: A voip call is added and FGS delegation is granted.
+        Call call1 = createTestCall("testCall1", mHandle1User1);
+        ArgumentCaptor<ServiceConnection> connCaptor =
+                ArgumentCaptor.forClass(ServiceConnection.class);
+
+        // Add the first call
+        mMonitor.onCallAdded(call1);
+
+        // Verify FGS is started and capture the connection
+        verify(mActivityManagerLocal, timeout(TIMEOUT).times(1))
+                .startForegroundServiceDelegate(any(ForegroundServiceDelegationParams.class),
+                        connCaptor.capture());
+        ServiceConnection conn1 = connCaptor.getValue();
+        conn1.onServiceConnected(mHandle1User1.getComponentName(), mServiceConnection);
+        assertTrue(mMonitor.hasForegroundServiceDelegation(mHandle1User1));
+
+        // WHEN: The call is removed, which should stop FGS delegation.
+        mMonitor.onCallRemoved(call1);
+
+        // THEN: Verify FGS delegation is stopped and the internal state is cleaned up.
+        verify(mActivityManagerLocal).stopForegroundServiceDelegate(
+                any(ForegroundServiceDelegationParams.class));
+        assertFalse("FGS delegation should be removed after the only call is removed",
+                mMonitor.hasForegroundServiceDelegation(mHandle1User1));
+
+        // WHEN: A new call from the same app is added.
+        Call call2 = createTestCall("testCall2", mHandle1User1);
+        mMonitor.onCallAdded(call2);
+
+        // THEN: FGS delegation should be granted again for the new call.
+        verify(mActivityManagerLocal, timeout(TIMEOUT).times(2))
+                .startForegroundServiceDelegate(any(ForegroundServiceDelegationParams.class),
+                        connCaptor.capture());
+
+        // Simulate the second connection being established
+        ServiceConnection conn2 = connCaptor.getAllValues().get(1);
+        conn2.onServiceConnected(mHandle1User1.getComponentName(), mServiceConnection);
+
+        assertTrue("FGS delegation should be re-granted for the new call",
+                mMonitor.hasForegroundServiceDelegation(mHandle1User1));
+    }
+
+    /**
+     * Tests the "Happy Path":
+     * 1. An Answer Request comes in.
+     * 2. The Monitor binds to the Jetpack ConnectionService.
+     * 3. On successful bind, the OutcomeReceiver is notified.
+     */
+    @SmallTest
+    @Test
+    public void testBindToVoipApp_Success() {
+        // GIVEN
+        Call call = createTestCall("testCall", mHandle1User1);
+        OutcomeReceiver<Object, Exception> callback = mock(OutcomeReceiver.class);
+
+        doReturn(true).when(mContext).bindServiceAsUser(
+                any(Intent.class), any(ServiceConnection.class), anyInt(), any(UserHandle.class));
+
+        // Capture the listener registered by VoipCallMonitor
+        mMonitor.onCallAdded(call);
+        ArgumentCaptor<Call.InCallServiceToVoipAppListener> listenerCaptor =
+                ArgumentCaptor.forClass(Call.InCallServiceToVoipAppListener.class);
+        verify(call).addInCallServiceToVoipAppListener(listenerCaptor.capture());
+        Call.InCallServiceToVoipAppListener listener = listenerCaptor.getValue();
+
+        // WHEN - The InCallService requests an answer
+        listener.onAnswerRequested(call, VideoProfile.STATE_AUDIO_ONLY, callback);
+
+        // THEN
+        // 1. Verify we tried to bind to the correct package/component
+        ArgumentCaptor<Intent> intentCaptor = ArgumentCaptor.forClass(Intent.class);
+        ArgumentCaptor<ServiceConnection> serviceConnCaptor =
+                ArgumentCaptor.forClass(ServiceConnection.class);
+
+        verify(mContext).bindServiceAsUser(intentCaptor.capture(), serviceConnCaptor.capture(),
+                eq(Context.BIND_AUTO_CREATE | Context.BIND_FOREGROUND_SERVICE
+                        | Context.BIND_ALLOW_BACKGROUND_ACTIVITY_STARTS),
+                eq(mHandle1User1.getUserHandle()));
+
+        Intent intent = intentCaptor.getValue();
+        assertEquals(ConnectionService.SERVICE_INTERFACE, intent.getAction());
+        assertEquals(PKG_NAME_1, intent.getPackage());
+        assertTrue(intent.getBooleanExtra(ConnectionService.EXTRA_IS_BAL_BINDING, false));
+
+        // 2. Simulate the system saying "Service Connected"
+        serviceConnCaptor.getValue().onServiceConnected(
+                new ComponentName(PKG_NAME_1, "Jetpack"), mock(IBinder.class));
+
+        // 3. Verify the Receiver completes successfully with the Monitor instance
+        verify(callback).onResult(any(VoipCallMonitor.class));
+    }
+
+    /**
+     * Tests that if we are already bound to an app for activity launching,
+     * we do not try to bind again, but we do trigger the callback immediately.
+     */
+    @SmallTest
+    @Test
+    public void testBindToVoipApp_AlreadyBound() {
+        // GIVEN
+        Call call = createTestCall("testCall", mHandle1User1);
+        OutcomeReceiver<Object, Exception> callback1 = mock(OutcomeReceiver.class);
+        OutcomeReceiver<Object, Exception> callback2 = mock(OutcomeReceiver.class);
+
+        doReturn(true).when(mContext).bindServiceAsUser(
+                any(Intent.class), any(ServiceConnection.class), anyInt(), any(UserHandle.class));
+
+        // Get listener
+        mMonitor.onCallAdded(call);
+        ArgumentCaptor<Call.InCallServiceToVoipAppListener> listenerCaptor =
+                ArgumentCaptor.forClass(Call.InCallServiceToVoipAppListener.class);
+        verify(call).addInCallServiceToVoipAppListener(listenerCaptor.capture());
+        Call.InCallServiceToVoipAppListener listener = listenerCaptor.getValue();
+
+        // WHEN - Request answer twice
+        listener.onAnswerRequested(call, VideoProfile.STATE_AUDIO_ONLY, callback1);
+        listener.onAnswerRequested(call, VideoProfile.STATE_AUDIO_ONLY, callback2);
+
+        // THEN
+        // Verify we only called bindServiceAsUser ONCE
+        verify(mContext, times(1)).bindServiceAsUser(
+                any(Intent.class), any(ServiceConnection.class), anyInt(), any(UserHandle.class));
+
+        // But verify BOTH callbacks were triggered
+        // 1. Simulate connection for the first one
+        ArgumentCaptor<ServiceConnection> sc = ArgumentCaptor.forClass(ServiceConnection.class);
+        verify(mContext).bindServiceAsUser(any(), sc.capture(), anyInt(), any());
+        sc.getValue().onServiceConnected(null, null); // Trigger callback1
+
+        // 2. callback2 should have been triggered immediately by the "already bound" check
+        verify(callback1).onResult(any());
+        verify(callback2).onResult(any());
+    }
+
+    /**
+     * Edge Case: If binding fails (returns false), we should not crash,
+     * and we should not schedule a timeout.
+     */
+    @SmallTest
+    @Test
+    public void testBindToVoipApp_BindFails() {
+        // GIVEN
+        Call call = createTestCall("testCall", mHandle1User1);
+
+        doReturn(false).when(mContext).bindServiceAsUser(
+                any(Intent.class), any(ServiceConnection.class), anyInt(), any(UserHandle.class));
+
+        mMonitor.onCallAdded(call);
+        ArgumentCaptor<Call.InCallServiceToVoipAppListener> listenerCaptor =
+                ArgumentCaptor.forClass(Call.InCallServiceToVoipAppListener.class);
+        verify(call).addInCallServiceToVoipAppListener(listenerCaptor.capture());
+
+        // WHEN
+        listenerCaptor.getValue().onAnswerRequested(call, 0, mock(OutcomeReceiver.class));
+
+        // THEN
+        // Verify we tried to bind
+        verify(mContext).bindServiceAsUser(
+                any(Intent.class), any(ServiceConnection.class), anyInt(), any(UserHandle.class));
+
+        // Verify NO timeout was scheduled (because we returned early)
+        verify(mHandler, never()).postDelayed(any(Runnable.class), anyLong());
     }
 
     /**
@@ -376,14 +572,15 @@ public class VoipCallMonitorTest extends TelecomTestCase {
                 createCallStyleNotification(), handle.getUserHandle(), "", 0);
     }
 
+    /*
     private ServiceConnection addCallAndVerifyFgsIsGained(Call call) {
         ArgumentCaptor<ServiceConnection> captor = ArgumentCaptor.forClass(ServiceConnection.class);
         // add the call to the VoipCallMonitor under test which will start FGS
         mMonitor.onCallAdded(call);
         // FGS should be granted within the timeout
-        verify(mActivityManagerInternal, timeout(TIMEOUT))
+        verify(mActivityManagerLocal, timeout(TIMEOUT))
                 .startForegroundServiceDelegate(any(
-                                ForegroundServiceDelegationOptions.class),
+                                ForegroundServiceDelegationParams.class),
                         captor.capture());
         // onServiceConnected must be called in order for VoipCallMonitor to start monitoring for
         // a notification before the timeout expires
@@ -393,17 +590,51 @@ public class VoipCallMonitorTest extends TelecomTestCase {
                 mServiceConnection);
         return serviceConnection;
     }
+    */
+
+    private ForegroundServiceDelegationParams addCallAndVerifyFgsIsGained(Call call) {
+        ArgumentCaptor<ServiceConnection> serviceConnectionCaptor =
+                ArgumentCaptor.forClass(ServiceConnection.class);
+        ArgumentCaptor<ForegroundServiceDelegationParams> paramsCaptor =
+                ArgumentCaptor.forClass(ForegroundServiceDelegationParams.class);
+
+        // add the call to the VoipCallMonitor under test which will start FGS
+        mMonitor.onCallAdded(call);
+
+        // FGS should be granted within the timeout
+        verify(mActivityManagerLocal, timeout(TIMEOUT))
+                .startForegroundServiceDelegate(
+                        paramsCaptor.capture(),
+                        serviceConnectionCaptor.capture());
+
+        // onServiceConnected must be called in order for VoipCallMonitor to start monitoring for
+        // a notification before the timeout expires
+        ServiceConnection serviceConnection = serviceConnectionCaptor.getValue();
+        serviceConnection.onServiceConnected(
+                call.getTargetPhoneAccount().getComponentName(),
+                mServiceConnection);
+
+        return paramsCaptor.getValue();
+    }
 
     /**
      * Verifies that a delayed runnable is posted to the handler to handle the notification timeout.
      * This also executes the captured runnable to simulate the timeout occurring.
      */
-    private void assertNotificationTimeoutTriggered() {
+    private void assertNotificationTimeoutTriggered(int runnableIndex) {
         ArgumentCaptor<Runnable> runnableCaptor = ArgumentCaptor.forClass(Runnable.class);
+        // Capture all calls to postDelayed
         verify(mHandler, atLeastOnce()).postDelayed(
                 runnableCaptor.capture(),
                 eq(VoipCallMonitor.NOTIFICATION_NOT_POSTED_IN_TIME_TIMEOUT));
-        Runnable capturedRunnable = runnableCaptor.getValue();
-        capturedRunnable.run();
+
+        // Get all captured runnables
+        List<Runnable> allRunnables = runnableCaptor.getAllValues();
+
+        // Run the specific one we are interested in (e.g., 0 for Call 1, 1 for Call 2)
+        if (runnableIndex < allRunnables.size()) {
+            allRunnables.get(runnableIndex).run();
+        }
     }
+
 }

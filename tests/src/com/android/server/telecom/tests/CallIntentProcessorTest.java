@@ -16,6 +16,7 @@
 
 package com.android.server.telecom.tests;
 
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyString;
 import static org.mockito.Mockito.eq;
@@ -23,9 +24,11 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import android.Manifest;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ActivityInfo;
 import android.content.pm.ComponentInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
@@ -33,10 +36,8 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.UserHandle;
 import android.os.UserManager;
-import android.platform.test.flag.junit.SetFlagsRule;
 
 import com.android.dx.mockito.inline.extended.ExtendedMockito;
-import com.android.internal.app.IntentForwarderActivity;
 import com.android.server.telecom.Call;
 import com.android.server.telecom.CallIntentProcessor;
 import com.android.server.telecom.CallsManager;
@@ -58,8 +59,6 @@ import java.util.concurrent.CompletableFuture;
 @RunWith(JUnit4.class)
 public class CallIntentProcessorTest extends TelecomTestCase {
 
-    @Rule
-    public final SetFlagsRule mSetFlagsRule = new SetFlagsRule();
     @Mock
     private CallsManager mCallsManager;
     @Mock
@@ -79,7 +78,7 @@ public class CallIntentProcessorTest extends TelecomTestCase {
     @Mock
     private ComponentInfo mComponentInfo;
     @Mock
-    private CompletableFuture<Call> mCall;
+    private CompletableFuture<Call> mCallFuture;
     private CallIntentProcessor mCallIntentProcessor;
     private static final UserHandle PRIVATE_SPACE_USERHANDLE = new UserHandle(12);
     private static final String TEST_PACKAGE_NAME = "testPackageName";
@@ -95,20 +94,69 @@ public class CallIntentProcessorTest extends TelecomTestCase {
                 mMockCreateContextAsUser);
         when(mMockCreateContextAsUser.getSystemService(UserManager.class)).thenReturn(
                 mMockCurrentUserManager);
+        when(mMockCreateContextAsUser.getPackageManager()).thenReturn(mPackageManager);
         mCallIntentProcessor = new CallIntentProcessor(mContext, mCallsManager, mDefaultDialerCache,
-                mFeatureFlags);
+                TELECOM_UI_PACKAGE_NAME, mFeatureFlags);
         when(mFeatureFlags.telecomResolveHiddenDependencies()).thenReturn(false);
         when(mCallsManager.getPhoneNumberUtilsAdapter()).thenReturn(mPhoneNumberUtilsAdapter);
         when(mPhoneNumberUtilsAdapter.isUriNumber(anyString())).thenReturn(true);
         when(mCallsManager.startOutgoingCall(any(Uri.class), any(), any(Bundle.class),
-                any(UserHandle.class), any(Intent.class), anyString())).thenReturn(mCall);
-        when(mCall.thenAccept(any())).thenReturn(null);
+                any(UserHandle.class), any(Intent.class), anyString())).thenReturn(mCallFuture);
+        when(mCallFuture.thenAccept(any())).thenReturn(CompletableFuture.completedFuture(null));
+    }
+
+    @Test
+    public void testDangerousCall_dialerPrivileged_noErrorDialog() {
+        Intent intent = new Intent(Intent.ACTION_CALL);
+        intent.setData(Uri.parse("tel:*72536")); // Dangerous MMI
+        intent.putExtra(CallIntentProcessor.KEY_INITIATING_USER, UserHandle.CURRENT);
+
+        // Not default dialer
+        when(mDefaultDialerCache.isDefaultOrSystemDialer(eq(TEST_PACKAGE_NAME),
+                        anyInt())).thenReturn(false);
+
+        // Has CALL_PRIVILEGED permission
+        when(mPackageManager.checkPermission(Manifest.permission.CALL_PRIVILEGED,
+                TEST_PACKAGE_NAME)).thenReturn(PackageManager.PERMISSION_GRANTED);
+
+        mCallIntentProcessor.processIntent(intent, TEST_PACKAGE_NAME);
+
+        // Verify startOutgoingCall IS called
+        verify(mCallsManager).startOutgoingCall(any(Uri.class), any(), any(Bundle.class),
+                eq(UserHandle.CURRENT), eq(intent), eq(TEST_PACKAGE_NAME));
+    }
+
+    @Test
+    public void testDangerousCall_dialerNotPrivileged_ErrorDialogShown() {
+        Intent intent = new Intent(Intent.ACTION_CALL);
+        intent.setData(Uri.parse("tel:*72536")); // Dangerous MMI
+        intent.putExtra(CallIntentProcessor.KEY_INITIATING_USER, UserHandle.CURRENT);
+
+        // Not default dialer
+        when(mDefaultDialerCache.isDefaultOrSystemDialer(eq(TEST_PACKAGE_NAME),
+             anyInt())).thenReturn(false);
+
+        // No CALL_PRIVILEGED permission
+        when(mPackageManager.checkPermission(Manifest.permission.CALL_PRIVILEGED,
+                TEST_PACKAGE_NAME)).thenReturn(PackageManager.PERMISSION_DENIED);
+
+        mCallIntentProcessor.processIntent(intent, TEST_PACKAGE_NAME);
+
+        // Verify startOutgoingCall is NEVER called
+        verify(mCallsManager, never()).startOutgoingCall(any(Uri.class), any(), any(Bundle.class),
+                any(UserHandle.class), any(Intent.class), anyString());
+
+        // Verify error dialog (startActivity)
+        // Note: NewOutgoingCallIntentBroadcaster also calls
+        // startActivityAsUser to launch system dialer
+        // AND CallIntentProcessor calls startActivityAsUser to show error dialog.
+        // So we expect at least one call.
+        verify(mContext, org.mockito.Mockito.atLeastOnce()).startActivityAsUser(any(Intent.class),
+                eq(UserHandle.CURRENT));
     }
 
     @Test
     public void testNonPrivateSpaceCall_noConsentDialogShown() {
-        setPrivateSpaceFlagsEnabled();
-
         Intent intent = new Intent(Intent.ACTION_CALL);
         intent.setData(TEST_PHONE_NUMBER);
         intent.putExtra(CallIntentProcessor.KEY_INITIATING_USER, UserHandle.CURRENT);
@@ -125,7 +173,6 @@ public class CallIntentProcessorTest extends TelecomTestCase {
 
     @Test
     public void testPrivateSpaceCall_isSelfManaged_noDialogShown() {
-        setPrivateSpaceFlagsEnabled();
         markInitiatingUserAsPrivateProfile();
         resolveAsIntentForwarderActivity();
 
@@ -151,7 +198,6 @@ public class CallIntentProcessorTest extends TelecomTestCase {
         ExtendedMockito.doReturn(true).when(
                 () -> TelephonyUtil.shouldProcessAsEmergency(any(), any()));
 
-        setPrivateSpaceFlagsEnabled();
         markInitiatingUserAsPrivateProfile();
         resolveAsIntentForwarderActivity();
 
@@ -169,7 +215,6 @@ public class CallIntentProcessorTest extends TelecomTestCase {
 
     @Test
     public void testPrivateSpaceCall_showConsentDialog() {
-        setPrivateSpaceFlagsEnabled();
         markInitiatingUserAsPrivateProfile();
         resolveAsIntentForwarderActivity();
 
@@ -181,16 +226,11 @@ public class CallIntentProcessorTest extends TelecomTestCase {
         mCallIntentProcessor.processIntent(intent, TEST_PACKAGE_NAME);
 
         // Consent dialog should be shown
-        verify(mContext).startActivityAsUser(any(Intent.class), eq(PRIVATE_SPACE_USERHANDLE));
+        verify(mMockCreateContextAsUser).startActivity(any(Intent.class));
 
         /// Verify that the call does not proceeds as normal since the dialog was shown
         verify(mCallsManager, never()).startOutgoingCall(any(), any(), any(), any(), any(),
                 anyString());
-    }
-
-    private void setPrivateSpaceFlagsEnabled() {
-        mSetFlagsRule.enableFlags(
-            android.multiuser.Flags.FLAG_ENABLE_PRIVATE_SPACE_INTENT_REDIRECTION);
     }
 
     private void markInitiatingUserAsPrivateProfile() {
@@ -198,15 +238,14 @@ public class CallIntentProcessorTest extends TelecomTestCase {
     }
 
     private void resolveAsIntentForwarderActivity() {
-        when(mComponentName.getShortClassName()).thenReturn(
-                IntentForwarderActivity.FORWARD_INTENT_TO_PARENT);
-        when(mComponentInfo.getComponentName()).thenReturn(mComponentName);
-        when(mResolveInfo.getComponentInfo()).thenReturn(mComponentInfo);
+        ActivityInfo activityInfo = new ActivityInfo();
+        activityInfo.packageName = TEST_PACKAGE_NAME;
+        activityInfo.name = mCallIntentProcessor.FORWARD_INTENT_TO_PARENT;
+        mResolveInfo.activityInfo = activityInfo;
 
         when(mContext.getPackageManager()).thenReturn(mPackageManager);
 
-        when(mPackageManager.resolveActivityAsUser(any(Intent.class),
-                any(PackageManager.ResolveInfoFlags.class),
-                eq(PRIVATE_SPACE_USERHANDLE.getIdentifier()))).thenReturn(mResolveInfo);
+        when(mPackageManager.resolveActivity(any(Intent.class),
+                any(PackageManager.ResolveInfoFlags.class))).thenReturn(mResolveInfo);
     }
 }

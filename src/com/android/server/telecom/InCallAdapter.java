@@ -16,12 +16,17 @@
 
 package com.android.server.telecom;
 
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothManager;
 import android.net.Uri;
 import android.os.Binder;
 import android.os.Bundle;
 import android.os.ResultReceiver;
 import android.os.UserHandle;
+import android.telecom.CallAudioState;
 import android.telecom.CallEndpoint;
+import android.telecom.flags.Flags;
 import android.telecom.Log;
 import android.telecom.PhoneAccountHandle;
 
@@ -34,7 +39,7 @@ import java.util.List;
  * {@link InCallController} creates an instance of this class and passes it to the in-call app after
  * binding to it. This adapter can receive commands and updates until the in-call app is unbound.
  */
-class InCallAdapter extends IInCallAdapter.Stub {
+public class InCallAdapter extends IInCallAdapter.Stub {
     private final CallsManager mCallsManager;
     private final CallIdMapper mCallIdMapper;
     private final TelecomSystem.SyncRoot mLock;
@@ -133,7 +138,7 @@ class InCallAdapter extends IInCallAdapter.Stub {
 
     @Override
     public void rejectCallWithReason(String callId,
-            @android.telecom.Call.RejectReason int rejectReason) {
+            /*@android.telecom.Call.RejectReason*/ int rejectReason) {
         try {
             Log.startSession(LogUtils.Sessions.ICA_REJECT_CALL, mOwnerPackageAbbreviation);
 
@@ -386,10 +391,49 @@ class InCallAdapter extends IInCallAdapter.Stub {
     public void setAudioRoute(int route, String bluetoothAddress) {
         try {
             Log.startSession(LogUtils.Sessions.ICA_SET_AUDIO_ROUTE, mOwnerPackageAbbreviation);
+            int uid = Binder.getCallingUid();
             long token = Binder.clearCallingIdentity();
             try {
                 synchronized (mLock) {
-                    mCallsManager.setAudioRoute(route, bluetoothAddress);
+                    mCallsManager.setAudioRoute(uid, route, bluetoothAddress);
+                    if (Flags.callEndpointRequestedApi()) {
+                        CallEndpointController controller = mCallsManager
+                                .getCallEndpointController();
+                        CallEndpoint requestedEndpoint = null;
+                        BluetoothDevice bluetoothDevice = null;
+
+                        // Find the CallEndpoint object corresponding to the requested route.
+                        if (route == CallAudioState.ROUTE_BLUETOOTH) {
+                            // If the route is BT, get the BluetoothDevice object from the address.
+                            BluetoothManager manager = mCallsManager.getContext()
+                                    .getSystemService(BluetoothManager.class);
+                            if (manager == null) {
+                                Log.w(this, "setAudioRoute: BluetoothManager not found");
+                                return;
+                            }
+                            BluetoothAdapter adapter = manager.getAdapter();
+                            if (adapter != null && BluetoothAdapter.checkBluetoothAddress(
+                                    bluetoothAddress)) {
+                                bluetoothDevice = adapter.getRemoteDevice(bluetoothAddress);
+                            } else if (bluetoothAddress != null) {
+                                Log.w(this, "setAudioRoute: Invalid Bluetooth "
+                                                + "address %s", bluetoothAddress);
+                            }
+                            if (bluetoothDevice != null) {
+                                requestedEndpoint = controller
+                                        .findMatchingBluetoothEndpoint(bluetoothDevice);
+                            }
+                        } else {
+                            requestedEndpoint = controller.findMatchingRouteEndpoint(route);
+                        }
+                        if (requestedEndpoint != null) {
+                            mCallsManager.onCallEndpointRequested(mOwnerPackageName,
+                                    requestedEndpoint);
+                        } else {
+                            Log.w(this, "setAudioRoute: Could not find matching CallEndpoint"
+                                    + " for route %d and address %s", route, bluetoothAddress);
+                        }
+                    }
                 }
             } finally {
                 Binder.restoreCallingIdentity(token);
@@ -403,10 +447,14 @@ class InCallAdapter extends IInCallAdapter.Stub {
     public void requestCallEndpointChange(CallEndpoint endpoint, ResultReceiver callback) {
         try {
             Log.startSession(LogUtils.Sessions.ICA_SET_AUDIO_ROUTE, mOwnerPackageAbbreviation);
+            int uid = Binder.getCallingUid();
             long token = Binder.clearCallingIdentity();
             try {
                 synchronized (mLock) {
-                    mCallsManager.requestCallEndpointChange(endpoint, callback);
+                    mCallsManager.requestCallEndpointChange(uid, endpoint, callback);
+                    if (Flags.callEndpointRequestedApi()) {
+                        mCallsManager.onCallEndpointRequested(mOwnerPackageName, endpoint);
+                    }
                 }
             } finally {
                 Binder.restoreCallingIdentity(token);

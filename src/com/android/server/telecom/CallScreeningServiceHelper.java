@@ -21,6 +21,7 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
+import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.os.Handler;
 import android.os.IBinder;
@@ -28,6 +29,7 @@ import android.os.RemoteException;
 import android.os.UserHandle;
 import android.telecom.CallScreeningService;
 import android.telecom.Log;
+import android.telecom.ParcelableCallResponse;
 import android.telecom.Logging.Session;
 import android.text.TextUtils;
 
@@ -57,12 +59,18 @@ public class CallScreeningServiceHelper {
 
         @Override
         public void onScreeningResponse(String callId, ComponentName componentName,
-                CallScreeningService.ParcelableCallResponse callResponse) {
+                ParcelableCallResponse callResponse) {
+            mFuture.complete(callResponse);
             unbindCallScreeningService();
         }
 
         private void unbindCallScreeningService() {
-            mContext.unbindService(mServiceConnection);
+            try {
+                mContext.unbindService(mServiceConnection);
+            } catch (IllegalArgumentException e) {
+                Log.i(this, "Exception when unbinding service %s : %s", mServiceConnection,
+                        e.getMessage());
+            }
         }
     }
 
@@ -179,9 +187,10 @@ public class CallScreeningServiceHelper {
                     // No locking needed -- CompletableFuture only lets one thread call complete.
                     Log.continueSession(mLoggingSession, "CSSH.timeout");
                     try {
-                        if (!mFuture.isDone()) {
-                            Log.w(TAG, "Cancelling call id process due to timeout");
+                        if (mFuture.isDone()) {
+                            return;
                         }
+                        Log.w(TAG, "Cancelling call id process due to timeout");
                         mFuture.complete(null);
                         mContext.unbindService(serviceConnection);
                     } catch (IllegalArgumentException e) {
@@ -214,13 +223,10 @@ public class CallScreeningServiceHelper {
                 .setPackage(packageName);
 
         List<ResolveInfo> entries;
-        if (flags.resolveHiddenDependenciesTwo()) {
-            entries = UserUtil.getPackageManagerFromUserHandler(context,
-                    userHandle).queryIntentServicesAsUser(intent, 0, userHandle.getIdentifier());
-        } else {
-            entries = context.getPackageManager().queryIntentServicesAsUser(
-                    intent, 0, userHandle.getIdentifier());
-        }
+        Context userContext = context.createContextAsUser(userHandle, 0 /* flags */);
+        PackageManager userPackageManager = userContext != null ?
+                userContext.getPackageManager() : context.getPackageManager();
+        entries = userPackageManager.queryIntentServices(intent, 0 /* flags */);
 
         if (entries.isEmpty()) {
             Log.i(TAG, packageName + " has no call screening service defined.");
@@ -247,7 +253,7 @@ public class CallScreeningServiceHelper {
                 intent,
                 serviceConnection,
                 Context.BIND_AUTO_CREATE | Context.BIND_FOREGROUND_SERVICE
-                | Context.BIND_SCHEDULE_LIKE_TOP_APP,
+                | Constants.BIND_SCHEDULE_LIKE_TOP_APP,
                 userHandle)) {
             Log.d(TAG,"bindServiceAsUser, found service,"
                     + "waiting for it to connect to user: %s", userHandle);

@@ -17,17 +17,13 @@
 package com.android.server.telecom.components;
 
 import com.android.server.telecom.CallIntentProcessor;
-import com.android.server.telecom.TelecomSystem;
-import com.android.server.telecom.flags.FeatureFlags;
-import com.android.server.telecom.flags.FeatureFlagsImpl;
+import com.android.server.telecom.ui.UiConstants;
 
 import android.app.Activity;
-import android.content.Context;
 import android.content.Intent;
 import android.os.Bundle;
 import android.os.PowerManager;
 import android.os.UserHandle;
-import android.os.UserManager;
 import android.telecom.Log;
 import android.telecom.TelecomManager;
 
@@ -47,8 +43,10 @@ import android.telecom.TelecomManager;
  * startActivityForResult on the CALL intent to allow its package name to be passed to
  * {@link UserCallActivity}. Calling startActivity will continue to work on all non-emergency
  * numbers just like it did pre-L.
+ * @deprecated Superseded by UserCallActivity in shim/ and TelecomUi/.
  */
-public class UserCallActivity extends Activity implements TelecomSystem.Component {
+@Deprecated
+public class UserCallActivity extends Activity {
 
     @Override
     protected void onCreate(Bundle bundle) {
@@ -64,19 +62,7 @@ public class UserCallActivity extends Activity implements TelecomSystem.Componen
             // See OutgoingCallBroadcaster in services/Telephony for more.
             Intent intent = getIntent();
             verifyCallAction(intent);
-            FeatureFlags featureFlags = getTelecomSystem() != null
-                    ? getTelecomSystem().getFeatureFlags()
-                    : new FeatureFlagsImpl();
-            final UserManager userManager = getSystemService(UserManager.class);
-            final UserHandle userHandle;
-
-            if (featureFlags.resolveHiddenDependenciesTwo()) {
-                userHandle = UserHandle.getUserHandleForUid(getLaunchedFromUid());
-            } else {
-                userHandle = new UserHandle(
-                        featureFlags.telecomResolveHiddenDependencies()
-                                ? UserHandle.myUserId() : userManager.getProcessUserId());
-            }
+            final UserHandle userHandle = UserHandle.getUserHandleForUid(getLaunchedFromUid());
 
             // Once control flow has passed to this activity, it is no longer guaranteed that we can
             // accurately determine whether the calling package has the CALL_PHONE runtime permission.
@@ -88,7 +74,8 @@ public class UserCallActivity extends Activity implements TelecomSystem.Componen
             // Note: getCallingPackage() is not appropriate as it only works for activities launched
             // with startActivityForResult.  getLaunchedFromPackage() lets priv apps known who
             // launched in all cases.
-            new UserCallIntentProcessor(this, userHandle, featureFlags)
+            // This is the legacy path - TelecomUi is always the aosp package in this scenario.
+            new UserCallIntentProcessor(this, userHandle, UiConstants.DEFAULT_TELECOM_UI_PACKAGE)
                     .processIntent(new Intent(intent), getLaunchedFromPackage(), false,
                             true /* hasCallAppOp*/, false /* isLocalInvocation */);
         } finally {
@@ -108,10 +95,5 @@ public class UserCallActivity extends Activity implements TelecomSystem.Componen
                 intent.setAction(Intent.ACTION_CALL);
             }
         }
-    }
-
-    @Override
-    public TelecomSystem getTelecomSystem() {
-        return TelecomSystem.getInstance();
     }
 }

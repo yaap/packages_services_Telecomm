@@ -19,6 +19,7 @@ package com.android.server.telecom;
 import android.Manifest;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.annotation.SuppressLint;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
@@ -27,7 +28,6 @@ import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.content.pm.ServiceInfo;
-import android.content.pm.UserInfo;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
@@ -39,15 +39,18 @@ import android.os.Bundle;
 import android.os.AsyncTask;
 import android.os.PersistableBundle;
 import android.os.Process;
+import android.os.SystemProperties;
 import android.os.UserHandle;
 import android.os.UserManager;
-import android.provider.Settings;
+import android.system.ErrnoException;
+import android.system.Os;
 import android.telecom.CallAudioState;
 import android.telecom.ConnectionService;
 import android.telecom.Log;
 import android.telecom.PhoneAccount;
 import android.telecom.PhoneAccountHandle;
-import android.telephony.AnomalyReporter;
+import android.telecom.TelecomManager;
+
 import android.telephony.CarrierConfigManager;
 import android.telephony.PhoneNumberUtils;
 import android.telephony.SubscriptionInfo;
@@ -57,12 +60,14 @@ import android.text.TextUtils;
 import android.util.AtomicFile;
 import android.util.Base64;
 import android.util.EventLog;
+import android.util.IndentingPrintWriter;
 import android.util.Xml;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.telephony.flags.FeatureFlags;
-import com.android.internal.util.IndentingPrintWriter;
-import com.android.internal.util.XmlUtils;
+import com.android.internal.util.FastXmlSerializer;
+import com.android.modules.utils.BinaryXmlPullParser;
+import com.android.modules.utils.BinaryXmlSerializer;
 import com.android.modules.utils.ModifiedUtf8;
 import com.android.server.telecom.flags.Flags;
 
@@ -70,16 +75,20 @@ import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserException;
 import org.xmlpull.v1.XmlSerializer;
 
+import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.lang.Integer;
 import java.lang.SecurityException;
 import java.lang.String;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -190,6 +199,7 @@ public class PhoneAccountRegistrar {
             new PhoneAccountRegistrarWriteLock() {};
     private final FeatureFlags mTelephonyFeatureFlags;
     private final com.android.server.telecom.flags.FeatureFlags mTelecomFeatureFlags;
+    private final AnomalyReporterAdapter mAnomalyReporter;
     public static final UUID EXCEPTION_COMPONENT_IS_NOT_VISIBLE_FOR_USER_UUID =
             UUID.fromString("8a23a3b0-7513-4475-9e61-a5e2b02e47e8");
     public static final String EXCEPTION_COMPONENT_IS_NOT_VISIBLE_FOR_USER_MSG =
@@ -198,25 +208,28 @@ public class PhoneAccountRegistrar {
     public PhoneAccountRegistrar(Context context, TelecomSystem.SyncRoot lock,
             DefaultDialerCache defaultDialerCache, AppLabelProxy appLabelProxy,
             FeatureFlags telephonyFeatureFlags,
-            com.android.server.telecom.flags.FeatureFlags telecomFeatureFlags) {
+            com.android.server.telecom.flags.FeatureFlags telecomFeatureFlags,
+            AnomalyReporterAdapter anomalyReporter) {
         this(context, lock, FILE_NAME, defaultDialerCache, appLabelProxy,
-                telephonyFeatureFlags, telecomFeatureFlags);
+                telephonyFeatureFlags, telecomFeatureFlags, anomalyReporter);
     }
 
     @VisibleForTesting
     public PhoneAccountRegistrar(Context context, TelecomSystem.SyncRoot lock, String fileName,
             DefaultDialerCache defaultDialerCache, AppLabelProxy appLabelProxy,
             FeatureFlags telephonyFeatureFlags,
-            com.android.server.telecom.flags.FeatureFlags telecomFeatureFlags) {
+            com.android.server.telecom.flags.FeatureFlags telecomFeatureFlags,
+            AnomalyReporterAdapter anomalyReporter) {
 
         mAtomicFile = new AtomicFile(new File(context.getFilesDir(), fileName));
 
         mState = new State();
         mContext = context;
         mLock = lock;
+        mAnomalyReporter = anomalyReporter;
         mUserManager = context.getSystemService(UserManager.class);
         mDefaultDialerCache = defaultDialerCache;
-        mSubscriptionManager = SubscriptionManager.from(mContext);
+        mSubscriptionManager = mContext.getSystemService(SubscriptionManager.class);
         mTelephonyManager = (TelephonyManager) mContext.getSystemService(Context.TELEPHONY_SERVICE);
         mAppLabelProxy = appLabelProxy;
         mCurrentUserHandle = Process.myUserHandle();
@@ -236,6 +249,68 @@ public class PhoneAccountRegistrar {
         mContext.registerReceiver(mManagedProfileReceiver, intentFilter);
 
         read();
+    }
+
+    /**
+     * Gets the local voicemail timeout duration for a given {@link PhoneAccountHandle}, or
+     * default to {@code null} if none set.  Here we assume null is "disabled".
+     * @param handle the handle to check.
+     * @return the local voicemail timeout, or {@code null} if disabled.
+     * @throws IllegalArgumentException If the provided phone account does not exist.
+     */
+    // Note: Using throws to ensure that callers ALWAYS check for the exception.
+    public @Nullable Duration getLocalVoicemailTimeout(@NonNull PhoneAccountHandle handle)
+            throws IllegalArgumentException {
+        // Ensure the phone account exists.
+        PhoneAccount phoneAccount = getPhoneAccountUnchecked(handle);
+        if (phoneAccount == null) {
+            throw new IllegalArgumentException("Illegal phone account");
+        }
+
+        return mState.localVoicemailTimeout.getOrDefault(handle, null);
+    }
+
+    /**
+     * Sets the timeout {@link Duration} for local voicemail to be triggered for a given
+     * {@link PhoneAccountHandle}.
+     * @param handle the handle
+     * @param timeout the timeout, or null if disabled.
+     * @throws IllegalArgumentException if the phone account isn't found, or if the timeout
+     * specified does not fall within the range specified in the {@link PhoneAccount}'s extras.
+     */
+    public void setLocalVoicemailTimeout(@NonNull PhoneAccountHandle handle,
+            @Nullable Duration timeout) throws IllegalArgumentException {
+        // Ensure the phone account exists.
+        Log.i(this, "setLocalVoicemailTimeout: handle=%s, duration=%s", handle, timeout);
+        PhoneAccount phoneAccount = getPhoneAccountUnchecked(handle);
+        if (phoneAccount == null) {
+            throw new IllegalArgumentException("Illegal phone account");
+        }
+
+        // Perform bounds checking on the duration.
+        long lowerBoundMillis = phoneAccount.getExtras() == null ? 0 :
+                phoneAccount.getExtras().getLong(
+                        PhoneAccount.EXTRA_LOCAL_VOICEMAIL_MINIMUM_TIMEOUT_MILLIS, 0);
+        long upperBoundMillis = phoneAccount.getExtras() == null ? Long.MAX_VALUE
+                : phoneAccount.getExtras().getLong(
+                        PhoneAccount.EXTRA_LOCAL_VOICEMAIL_MAXIMUM_TIMEOUT_MILLIS, Long.MAX_VALUE);
+        Duration lowerBound = Duration.ofMillis(lowerBoundMillis);
+        Duration upperBound = Duration.ofMillis(upperBoundMillis);
+
+        // Ensure timeout is in the range specified by the phone account.
+        if (timeout != null && (
+                timeout.compareTo(lowerBound) < 0 || timeout.compareTo(upperBound) > 0)) {
+            throw new IllegalArgumentException("Illegal timeout");
+        }
+
+        if (timeout == null) {
+            // Timeout is now null meaning disabled.
+            mState.localVoicemailTimeout.remove(handle);
+        } else {
+            // Time is not null, so local vm is enabled.
+            mState.localVoicemailTimeout.put(handle, timeout);
+        }
+        write();
     }
 
     /**
@@ -559,9 +634,7 @@ public class PhoneAccountRegistrar {
     public PhoneAccountHandle getSimCallManager(int subId, UserHandle userHandle) {
 
         // Get the default dialer in case it has a connection manager associated with it.
-        String dialerPackage = mTelecomFeatureFlags.resolveHiddenDependenciesTwo() ?
-                mDefaultDialerCache.getDefaultDialerApplication(userHandle) :
-                mDefaultDialerCache.getDefaultDialerApplicationLegacy(userHandle.getIdentifier());
+        String dialerPackage = mDefaultDialerCache.getDefaultDialerApplication(userHandle);
 
         // Check carrier config.
         ComponentName systemSimCallManagerComponent = getSystemSimCallManagerComponent(subId);
@@ -820,10 +893,7 @@ public class PhoneAccountRegistrar {
 
         if (acrossProfiles) {
             UserManager um = mContext.getSystemService(UserManager.class);
-            return mTelecomFeatureFlags.telecomResolveHiddenDependencies()
-                    ? um.isSameProfileGroup(userHandle, phoneAccountUserHandle)
-                    : um.isSameProfileGroup(userHandle.getIdentifier(),
-                            phoneAccountUserHandle.getIdentifier());
+            return um.isSameProfileGroup(userHandle, phoneAccountUserHandle);
         } else {
             return phoneAccountUserHandle.equals(userHandle);
         }
@@ -841,22 +911,17 @@ public class PhoneAccountRegistrar {
         try {
             if (userHandle != null) {
                 List<ResolveInfo> info;
-                if (mTelecomFeatureFlags.resolveHiddenDependenciesTwo()) {
-                    try {
-                        info = UserUtil.getPackageManagerFromUserHandler(mContext, userHandle)
-                                .queryIntentServices(intent, 0);
-                    } catch (Exception e) {
-                        Log.e(this, e, "encountered an exception while" +
-                                        "resolving the component=[%s] under userHandle=[%s]",
-                                componentName, userHandle);
-                        AnomalyReporter.reportAnomaly(
-                                EXCEPTION_COMPONENT_IS_NOT_VISIBLE_FOR_USER_UUID,
-                                EXCEPTION_COMPONENT_IS_NOT_VISIBLE_FOR_USER_MSG);
-                        return Collections.EMPTY_LIST;
-                    }
-                } else {
-                    PackageManager pm = mContext.getPackageManager();
-                    info = pm.queryIntentServicesAsUser(intent, 0, userHandle.getIdentifier());
+                try {
+                    info = UserUtil.getPackageManagerFromUserHandler(mContext, userHandle)
+                            .queryIntentServices(intent, 0);
+                } catch (Exception e) {
+                    Log.e(this, e, "encountered an exception while" +
+                                    "resolving the component=[%s] under userHandle=[%s]",
+                            componentName, userHandle);
+                    mAnomalyReporter.reportAnomaly(
+                            EXCEPTION_COMPONENT_IS_NOT_VISIBLE_FOR_USER_UUID,
+                            EXCEPTION_COMPONENT_IS_NOT_VISIBLE_FOR_USER_MSG);
+                    return Collections.EMPTY_LIST;
                 }
                 return info;
             } else {
@@ -1039,9 +1104,7 @@ public class PhoneAccountRegistrar {
             enforcePhoneAccountTargetService(account);
         }
         enforceMaxPhoneAccountLimit(account);
-        if (mTelephonyFeatureFlags.simultaneousCallingIndications()) {
-            enforceSimultaneousCallingRestrictionLimit(account);
-        }
+        enforceSimultaneousCallingRestrictionLimit(account);
         addOrReplacePhoneAccount(account);
     }
 
@@ -1578,6 +1641,10 @@ public class PhoneAccountRegistrar {
         }
     }
 
+    /* TODO: b/478043076 - Remove SuppressLint once the API is finalized.
+     * And update the SDK check to the final version number.
+     */
+    @SuppressLint("NewApi")
     private void maybeNotifyTelephonyForVoiceServiceState(
             @NonNull PhoneAccount account, boolean registered) {
         // TODO(b/215419665) what about SIM_SUBSCRIPTION accounts? They could theoretically also use
@@ -1967,6 +2034,14 @@ public class PhoneAccountRegistrar {
                 = new ConcurrentHashMap<>();
 
         /**
+         * Stores the per-{@link PhoneAccountHandle} setting for the local voicemail timeout.  This
+         * controls how long a call will be in a ringing state before local voicemail picks up the
+         * call.
+         */
+        public final Map<PhoneAccountHandle, Duration> localVoicemailTimeout =
+                new ConcurrentHashMap<>();
+
+        /**
          * The complete list of {@code PhoneAccount}s known to the Telecom subsystem.
          */
         public final List<PhoneAccount> accounts = new CopyOnWriteArrayList<>();
@@ -1993,6 +2068,16 @@ public class PhoneAccountRegistrar {
             this.userHandle = userHandle;
             this.phoneAccountHandle = phoneAccountHandle;
             this.groupId = groupId;
+        }
+    }
+
+    public static class LocalVoicemailTimeout {
+        public PhoneAccountHandle phoneAccountHandle;
+        public Duration timeout;
+
+        public LocalVoicemailTimeout(PhoneAccountHandle phoneAccountHandle, Duration timeout) {
+            this.phoneAccountHandle = phoneAccountHandle;
+            this.timeout = timeout;
         }
     }
 
@@ -2031,6 +2116,11 @@ public class PhoneAccountRegistrar {
             pw.decreaseIndent();
             pw.increaseIndent();
             pw.println("test emergency PhoneAccount filter: " + mTestPhoneAccountPackageNameFilters);
+            pw.decreaseIndent();
+            pw.println("localVoicemailTimeouts:");
+            pw.increaseIndent();
+            mState.localVoicemailTimeout.forEach((pa, d) -> pw.println(
+                    pa + " -> " + d));
             pw.decreaseIndent();
         }
     }
@@ -2109,13 +2199,26 @@ public class PhoneAccountRegistrar {
         try {
             sortPhoneAccounts();
             ByteArrayOutputStream os = new ByteArrayOutputStream();
-            XmlSerializer serializer = Xml.resolveSerializer(os);
+            XmlSerializer serializer = resolveSerializer(os);
             writeToXml(mState, serializer, mContext, mTelephonyFeatureFlags, mTelecomFeatureFlags);
             serializer.flush();
             new AsyncXmlWriter().execute(os);
         } catch (IOException e) {
             Log.e(this, e, "Writing state to XML buffer");
         }
+    }
+
+    private XmlSerializer resolveSerializer(OutputStream out) throws IOException {
+        final boolean useBinary = SystemProperties.getBoolean("persist.sys.binary_xml", true);
+
+        XmlSerializer serializer;
+        if (useBinary) {
+            serializer = new BinaryXmlSerializer();
+        } else {
+            serializer = new FastXmlSerializer();
+        }
+       serializer.setOutput(out, "utf-8");
+        return serializer;
     }
 
     private void read() {
@@ -2129,7 +2232,7 @@ public class PhoneAccountRegistrar {
         boolean versionChanged = false;
 
         try {
-            XmlPullParser parser = Xml.resolvePullParser(is);
+            XmlPullParser parser = resolvePullParser(is);
             parser.nextTag();
             mState = readFromXml(parser, mContext, mTelephonyFeatureFlags, mTelecomFeatureFlags);
             migratePhoneAccountHandle(mState);
@@ -2164,6 +2267,34 @@ public class PhoneAccountRegistrar {
         if (versionChanged || !badAccounts.isEmpty()) {
             write();
         }
+    }
+
+    private XmlPullParser resolvePullParser(InputStream in)
+            throws IOException, XmlPullParserException {
+        final byte[] magic = new byte[4];
+        if (in instanceof FileInputStream) {
+            try {
+                Os.pread(((FileInputStream) in).getFD(), magic, 0, magic.length, 0);
+            } catch (ErrnoException e) {
+                throw e.rethrowAsIOException();
+            }
+        } else {
+            if (!in.markSupported()) {
+                in = new BufferedInputStream(in);
+            }
+            in.mark(8);
+            in.read(magic);
+            in.reset();
+        }
+
+        XmlPullParser parser;
+        if (Arrays.equals(magic, BinaryXmlSerializer.PROTOCOL_MAGIC_VERSION_0)) {
+            parser = new BinaryXmlPullParser();
+        } else {
+            parser = Xml.newPullParser();
+        }
+        parser.setInput(in, "utf-8");
+        return parser;
     }
 
     private static void writeToXml(State state, XmlSerializer serializer, Context context,
@@ -2258,9 +2389,6 @@ public class PhoneAccountRegistrar {
         public boolean nextElementWithin(XmlPullParser parser, int outerDepth,
                 com.android.server.telecom.flags.FeatureFlags featureFlags)
                 throws IOException, XmlPullParserException {
-            if (!featureFlags.resolveHiddenDependenciesTwo()) {
-                return XmlUtils.nextElementWithin(parser, outerDepth);
-            }
             for (;;) {
                 int type = parser.next();
                 if (type == XmlPullParser.END_DOCUMENT
@@ -2408,14 +2536,9 @@ public class PhoneAccountRegistrar {
         public static String writeIconToBase64String(Icon icon,
                 com.android.server.telecom.flags.FeatureFlags telecomFeatureFlags, Context context)
                 throws IOException {
-            ByteArrayOutputStream stream = new ByteArrayOutputStream();
-            if (telecomFeatureFlags.resolveHiddenDependenciesTwo()) {
-                stream = iconToStream(context, icon);
-                if (stream == null) {
-                    return "";
-                }
-            } else {
-                icon.writeToStream(stream);
+            ByteArrayOutputStream stream = iconToStream(context, icon);
+            if (stream == null) {
+                return "";
             }
             byte[] iconByteArray = stream.toByteArray();
             return Base64.encodeToString(iconByteArray, 0, iconByteArray.length, 0);
@@ -2608,6 +2731,9 @@ public class PhoneAccountRegistrar {
         }
 
         protected Bitmap readBitmap(XmlPullParser parser) {
+            if (parser.getText() == null) {
+                return null;
+            }
             byte[] imageByteArray = Base64.decode(parser.getText(), 0);
             return BitmapFactory.decodeByteArray(imageByteArray, 0, imageByteArray.length);
         }
@@ -2617,21 +2743,19 @@ public class PhoneAccountRegistrar {
                 com.android.server.telecom.flags.FeatureFlags telecomFeatureFlags)
                 throws IOException {
             try {
+                if (parser.getText() == null) {
+                    Log.w(this, "XmlPullParser.getText returned null.");
+                    return null;
+                }
                 byte[] iconByteArray = Base64.decode(parser.getText(), 0);
                 ByteArrayInputStream stream = new ByteArrayInputStream(iconByteArray);
-                Icon icon;
-                if (telecomFeatureFlags.resolveHiddenDependenciesTwo()) {
-                    Bitmap bitmap = BitmapFactory.decodeStream(stream);
-                    if (bitmap == null) {
-                        Log.w(this, "BitmapFactory.decodeStream returned null."
-                                + " The stream data may be malformed.");
-                        return null;
-                    }
-                    icon = Icon.createWithBitmap(bitmap);
-                } else {
-                    icon = Icon.createFromStream(stream);
+                Bitmap bitmap = BitmapFactory.decodeStream(stream);
+                if (bitmap == null) {
+                    Log.w(this, "BitmapFactory.decodeStream returned null."
+                            + " The stream data may be malformed.");
+                    return null;
                 }
-                return icon;
+                return Icon.createWithBitmap(bitmap);
             } catch (IllegalArgumentException e) {
                 Log.e(this, e, "Bitmap must not be null.");
                 return null;
@@ -2644,6 +2768,7 @@ public class PhoneAccountRegistrar {
             new XmlSerialization<State>() {
         private static final String CLASS_STATE = "phone_account_registrar_state";
         private static final String DEFAULT_OUTGOING = "default_outgoing";
+        private static final String LOCAL_VOICEMAIL_TIMEOUT = "local_voicemail_timeout";
         private static final String ACCOUNTS = "accounts";
         private static final String VERSION = "version";
 
@@ -2672,6 +2797,20 @@ public class PhoneAccountRegistrar {
                 }
                 serializer.endTag(null, ACCOUNTS);
 
+                // Lets write out the local voicemail timeouts!
+                if (android.telecom.flags.Flags.localVoicemail()) {
+                    serializer.startTag(null, LOCAL_VOICEMAIL_TIMEOUT);
+                    o.localVoicemailTimeout.forEach((x, y) -> {
+                        try {
+                            sLocalVoicemailTimeout.writeToXml(
+                                    new LocalVoicemailTimeout(x, y), serializer, context,
+                                    telephonyFeatureFlags,
+                                    telecomFeatureFlags);
+                        } catch (IOException e) {
+                        }
+                    });
+                    serializer.endTag(null, LOCAL_VOICEMAIL_TIMEOUT);
+                }
                 serializer.endTag(null, CLASS_STATE);
             }
         }
@@ -2702,12 +2841,6 @@ public class PhoneAccountRegistrar {
                             // UserManager#getMainUser requires either the MANAGE_USERS,
                             // CREATE_USERS, or QUERY_USERS permission.
                             UserHandle primaryUser = userManager.getMainUser();
-                            UserInfo primaryUserInfo = userManager.getPrimaryUser();
-                            if (!telecomFeatureFlags.telecomResolveHiddenDependencies()) {
-                                primaryUser = primaryUserInfo != null
-                                        ? primaryUserInfo.getUserHandle()
-                                        : null;
-                            }
                             if (primaryUser != null) {
                                 DefaultPhoneAccountHandle defaultPhoneAccountHandle
                                         = new DefaultPhoneAccountHandle(primaryUser,
@@ -2740,6 +2873,19 @@ public class PhoneAccountRegistrar {
                                 s.accounts.add(account);
                             }
                         }
+                    } else if (parser.getName().equals(LOCAL_VOICEMAIL_TIMEOUT)) {
+                        int localVoicemailDepth = parser.getDepth();
+                        while (nextElementWithin(parser, localVoicemailDepth,
+                                telecomFeatureFlags)) {
+                            LocalVoicemailTimeout timeout = sLocalVoicemailTimeout.readFromXml(
+                                    parser, s.versionNumber, context, telephonyFeatureFlags,
+                                    telecomFeatureFlags);
+                            if (timeout != null) {
+                                s.localVoicemailTimeout.put(timeout.phoneAccountHandle,
+                                        timeout.timeout);
+                            }
+                        }
+
                     }
                 }
                 return s;
@@ -2822,6 +2968,71 @@ public class PhoneAccountRegistrar {
                 }
             };
 
+    public static final XmlSerialization<LocalVoicemailTimeout> sLocalVoicemailTimeout =
+            new XmlSerialization<>() {
+                private static final String LOCAL_VOICEMAIL_TIMEOUT
+                        = "local_voicemail_timeout";
+                private static final String DURATION_MILLIS = "duration_millis";
+                private static final String ACCOUNT_HANDLE = "account_handle";
+
+                @Override
+                public void writeToXml(LocalVoicemailTimeout o,
+                        XmlSerializer serializer, Context context,
+                        FeatureFlags telephonyFeatureFlags,
+                        com.android.server.telecom.flags.FeatureFlags telecomFeatureFlags)
+                        throws IOException {
+                    serializer.startTag(null, LOCAL_VOICEMAIL_TIMEOUT);
+                    serializer.startTag(null, ACCOUNT_HANDLE);
+                    sPhoneAccountHandleXml.writeToXml(o.phoneAccountHandle, serializer,
+                            context, telephonyFeatureFlags, telecomFeatureFlags);
+                    serializer.endTag(null, ACCOUNT_HANDLE);
+                    if (o.timeout == null) {
+                        // empty string seems to be the way.
+                        writeTextIfNonNull(DURATION_MILLIS, "", serializer);
+                    } else {
+                        writeLong(DURATION_MILLIS, o.timeout.toMillis(), serializer);
+                    }
+                    serializer.endTag(null, LOCAL_VOICEMAIL_TIMEOUT);
+                }
+
+                @Override
+                public LocalVoicemailTimeout readFromXml(XmlPullParser parser,
+                        int version, Context context, FeatureFlags telephonyFeatureFlags,
+                        com.android.server.telecom.flags.FeatureFlags featureFlags)
+                        throws IOException, XmlPullParserException {
+                    if (parser.getName().equals(LOCAL_VOICEMAIL_TIMEOUT)) {
+                        int outerDepth = parser.getDepth();
+                        PhoneAccountHandle accountHandle = null;
+                        String timeoutMillis = null;
+                        while (nextElementWithin(parser, outerDepth, featureFlags)) {
+                            if (parser.getName().equals(ACCOUNT_HANDLE)) {
+                                parser.nextTag();
+                                accountHandle = sPhoneAccountHandleXml.readFromXml(parser, version,
+                                        context, telephonyFeatureFlags, featureFlags);
+                            } else if (parser.getName().equals(DURATION_MILLIS)) {
+                                parser.next();
+                                timeoutMillis = parser.getText();
+                            }
+                        }
+
+                        Duration timeoutDuration;
+                        if (timeoutMillis != null) {
+                            try {
+                                timeoutDuration = Duration.ofMillis(Long.parseLong(timeoutMillis));
+                            } catch (NumberFormatException nfe) {
+                                timeoutDuration = null;
+                            }
+                        } else {
+                            timeoutDuration = null;
+                        }
+                        if (accountHandle != null && timeoutDuration != null) {
+                            return new LocalVoicemailTimeout(accountHandle, timeoutDuration);
+                        }
+                    }
+                    return null;
+                }
+            };
+
 
     @VisibleForTesting
     public static final XmlSerialization<PhoneAccount> sPhoneAccountXml =
@@ -2874,8 +3085,7 @@ public class PhoneAccountRegistrar {
                 writeTextIfNonNull(ENABLED, o.isEnabled() ? "true" : "false" , serializer);
                 writeTextIfNonNull(SUPPORTED_AUDIO_ROUTES, Integer.toString(
                         o.getSupportedAudioRoutes()), serializer);
-                if (o.hasSimultaneousCallingRestriction()
-                        && telephonyFeatureFlags.simultaneousCallingIndications()) {
+                if (o.hasSimultaneousCallingRestriction()) {
                     writePhoneAccountHandleSet(SIMULTANEOUS_CALLING_RESTRICTION,
                             o.getSimultaneousCallingRestriction(), serializer, context,
                             telephonyFeatureFlags, telecomFeatureFlags);
@@ -3040,8 +3250,7 @@ public class PhoneAccountRegistrar {
                 } else if (!TextUtils.isEmpty(iconPackageName)) {
                     builder.setIcon(Icon.createWithResource(iconPackageName, iconResId));
                     // TODO: Need to set tint.
-                } else if (simultaneousCallingRestriction != null
-                        && telephonyFeatureFlags.simultaneousCallingIndications()) {
+                } else if (simultaneousCallingRestriction != null) {
                     builder.setSimultaneousCallingRestriction(simultaneousCallingRestriction);
                 }
 

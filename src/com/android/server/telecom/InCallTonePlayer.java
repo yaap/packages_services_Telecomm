@@ -56,16 +56,18 @@ public class InCallTonePlayer extends Thread {
         private final AudioManagerAdapter mAudioManagerAdapter;
         private final FeatureFlags mFeatureFlags;
         private final Looper mLooper;
+        private final Context mContext;
 
         public Factory(TelecomSystem.SyncRoot lock, ToneGeneratorFactory toneGeneratorFactory,
                 MediaPlayerFactory mediaPlayerFactory, AudioManagerAdapter audioManagerAdapter,
-                FeatureFlags flags, Looper looper) {
+                FeatureFlags flags, Looper looper, Context context) {
             mLock = lock;
             mToneGeneratorFactory = toneGeneratorFactory;
             mMediaPlayerFactory = mediaPlayerFactory;
             mAudioManagerAdapter = audioManagerAdapter;
             mFeatureFlags = flags;
             mLooper = looper;
+            mContext = context;
         }
 
         public void setCallAudioManager(CallAudioManager callAudioManager) {
@@ -74,7 +76,7 @@ public class InCallTonePlayer extends Thread {
 
         public InCallTonePlayer createPlayer(Call call, int tone) {
             return new InCallTonePlayer(call, tone, mCallAudioManager, mLock, mToneGeneratorFactory,
-                    mMediaPlayerFactory, mAudioManagerAdapter, mFeatureFlags, mLooper);
+                    mMediaPlayerFactory, mAudioManagerAdapter, mFeatureFlags, mLooper, mContext);
         }
     }
 
@@ -150,6 +152,10 @@ public class InCallTonePlayer extends Thread {
     }
 
     // The possible tones that we can play.
+    // TODO(b/469249115): This constant is not available in the public ToneGenerator API.
+    // Redefined locally to remove hidden API dependency.
+    // Default value for an unknown or unspecified tone.
+    private static final int TONE_UNKNOWN = -1;
     public static final int TONE_INVALID = 0;
     public static final int TONE_BUSY = 1;
     public static final int TONE_CALL_ENDED = 2;
@@ -168,6 +174,7 @@ public class InCallTonePlayer extends Thread {
     public static final int TONE_RTT_REQUEST = 15;
     public static final int TONE_IN_CALL_QUALITY_NOTIFICATION = 16;
     public static final int TONE_OUTGOING_CALL_ACCEPTED = 17;
+    public static final int TONE_LOW_BATTERY = 18;
 
     private static final int TONE_RESOURCE_ID_UNDEFINED = -1;
 
@@ -219,6 +226,7 @@ public class InCallTonePlayer extends Thread {
     private final MediaPlayerFactory mMediaPlayerFactory;
     private final AudioManagerAdapter mAudioManagerAdapter;
     private final FeatureFlags mFeatureFlags;
+    private final Context mContext;
 
     /**
      * Latch used for awaiting on playback, which may be interrupted if the tone is stopped from
@@ -240,8 +248,10 @@ public class InCallTonePlayer extends Thread {
             MediaPlayerFactory mediaPlayerFactor,
             AudioManagerAdapter audioManagerAdapter,
             FeatureFlags flags,
-            Looper looper) {
+            Looper looper,
+            Context context) {
         mCall = call;
+        mContext = context;
         mState = STATE_OFF;
         mToneId = toneId;
         mCallAudioManager = callAudioManager;
@@ -281,12 +291,12 @@ public class InCallTonePlayer extends Thread {
                     break;
                 case TONE_CALL_ENDED:
                     // Don't use tone generator
-                    toneType = ToneGenerator.TONE_UNKNOWN;
+                    toneType = TONE_UNKNOWN;
                     toneVolume = RELATIVE_VOLUME_UNDEFINED;
                     toneLengthMillis = 0;
 
                     // Use a tone resource file for a more rich, full-bodied tone experience.
-                    mediaResourceId = R.raw.endcall;
+                    mediaResourceId = TelecomResourceId.getIdentifier(mContext, "endcall", "raw");
                     break;
                 case TONE_OTA_CALL_ENDED:
                     // TODO: fill in
@@ -358,12 +368,13 @@ public class InCallTonePlayer extends Thread {
                     break;
                 case TONE_IN_CALL_QUALITY_NOTIFICATION:
                     // Don't use tone generator
-                    toneType = ToneGenerator.TONE_UNKNOWN;
+                    toneType = TONE_UNKNOWN;
                     toneVolume = RELATIVE_VOLUME_UNDEFINED;
                     toneLengthMillis = 0;
 
                     // Use a tone resource file for a more rich, full-bodied tone experience.
-                    mediaResourceId = R.raw.InCallQualityNotification;
+                    mediaResourceId = TelecomResourceId.getIdentifier(mContext,
+                            "InCallQualityNotification", "raw");
                     break;
                 case TONE_OUTGOING_CALL_ACCEPTED:
                     // Similar to the call waiting tone, but does not repeat.
@@ -372,12 +383,18 @@ public class InCallTonePlayer extends Thread {
                     toneLengthMillis = 150;
                     mediaResourceId = TONE_RESOURCE_ID_UNDEFINED;
                     break;
+                case TONE_LOW_BATTERY:
+                    toneType = ToneGenerator.TONE_SUP_CONFIRM;
+                    toneVolume = RELATIVE_VOLUME_HIPRI;
+                    toneLengthMillis = 10000;
+                    mediaResourceId = TONE_RESOURCE_ID_UNDEFINED;
+                    break;
                 default:
                     throw new IllegalStateException("Bad toneId: " + mToneId);
             }
 
             int stream = AudioManager.STREAM_VOICE_CALL;
-            if (toneType != ToneGenerator.TONE_UNKNOWN) {
+            if (toneType != TONE_UNKNOWN) {
                 playToneGeneratorTone(stream, toneVolume, toneType, toneLengthMillis);
             } else if (mediaResourceId != TONE_RESOURCE_ID_UNDEFINED) {
                 playMediaTone(stream, mediaResourceId);
